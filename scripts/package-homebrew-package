@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage:
+  scripts/package-homebrew-package <package> <version> [output-dir]
+
+Builds a deterministic release archive from packages/<package>.
+EOF
+}
+
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  usage >&2
+  exit 1
+fi
+
+package="$1"
+version="$2"
+output_dir="${3:-dist}"
+
+repo_root="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1
+  pwd
+)"
+
+package_dir="$repo_root/packages/$package"
+if [[ ! -d "$package_dir" ]]; then
+  echo "Unknown package: $package" >&2
+  echo "Expected directory: $package_dir" >&2
+  exit 1
+fi
+
+mkdir -p "$output_dir"
+archive="$output_dir/$package-v$version.tar.gz"
+
+tar \
+  --sort=name \
+  --owner=0 \
+  --group=0 \
+  --numeric-owner \
+  --mtime="@0" \
+  -czf "$archive" \
+  -C "$package_dir" \
+  .
+
+sha256sum "$archive"

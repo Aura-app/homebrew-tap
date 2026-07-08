@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1
+  pwd
+)"
+
+default_config_file() {
+  local candidate
+
+  for candidate in \
+    "$SCRIPT_DIR/../share/db-tunnels.json" \
+    "$SCRIPT_DIR/../share/db-tunnel/db-tunnels.json" \
+    "$SCRIPT_DIR/db-tunnels.json"
+  do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  printf '%s\n' "$SCRIPT_DIR/../share/db-tunnels.json"
+}
+
+DEFAULT_CONFIG_FILE="$(default_config_file)"
+CONFIG_FILE="${DB_TUNNELS_CONFIG:-$DEFAULT_CONFIG_FILE}"
+
+usage() {
+  cat <<EOF
+Usage:
+  db-tunnel list
+  db-tunnel open <name> [--local-port PORT]
+
+Examples:
+  db-tunnel list
+  db-tunnel open dev
+  db-tunnel open staging --local-port 15440
+
+Environment:
+  DB_TUNNELS_CONFIG  Override config file path.
+EOF
+}
+
+require_command() {
+  local command_name="$1"
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Missing required command: $command_name" >&2
+    exit 1
+  fi
+}
+
+check_config() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+  fi
+}
+
+list_tunnels() {
+  check_config
+
+  echo "Available database tunnels:"
+  echo
+
+  jq -r '
+    .tunnels
+    | to_entries[]
+    | "  \(.key)\n    description: \(.value.description // "-")\n    local:       localhost:\(.value.localPort)\n    remote:      \(.value.host):\(.value.remotePort)\n    database:    \(.value.database // "-")\n    profile:     \(.value.profile)\n    user:        \(.value.user // "-")\n"
+  ' "$CONFIG_FILE"
+}
+
+ensure_aws_login() {
+  local profile="$1"
+
+  if ! aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+    echo "AWS profile '$profile' is not currently authenticated."
+    echo "Attempting AWS SSO login..."
+    aws sso login --profile "$profile"
+  fi
+}
+
+open_tunnel() {
+  local tunnel_name=""
+  local local_port_override=""
+
+  if [[ $# -lt 1 ]]; then
+    echo "Missing tunnel name." >&2
+    usage
+    exit 1
+  fi
+
+  tunnel_name="$1"
+  shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --local-port)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --local-port." >&2
+          exit 1
+        fi
+        local_port_override="$2"
+        shift 2
+        ;;
+
+      -h|--help)
+        usage
+        exit 0
+        ;;
+
+      *)
+        echo "Unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  check_config
+
+  local exists
+  exists="$(jq -r --arg name "$tunnel_name" '.tunnels[$name] != null' "$CONFIG_FILE")"
+
+  if [[ "$exists" != "true" ]]; then
+    echo "Unknown tunnel: $tunnel_name" >&2
+    echo >&2
+    list_tunnels >&2
+    exit 1
+  fi
+
+  local profile region target host database remote_port local_port description db_user
+
+  profile="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].profile' "$CONFIG_FILE")"
+  region="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].region' "$CONFIG_FILE")"
+  target="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].target' "$CONFIG_FILE")"
+  host="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].host' "$CONFIG_FILE")"
+  database="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].database' "$CONFIG_FILE")"
+  remote_port="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].remotePort' "$CONFIG_FILE")"
+  local_port="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].localPort' "$CONFIG_FILE")"
+  description="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].description // ""' "$CONFIG_FILE")"
+  db_user="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].user // .tunnels[$name].username // .tunnels[$name].dbUser // ""' "$CONFIG_FILE")"
+
+  if [[ -n "$local_port_override" ]]; then
+    local_port="$local_port_override"
+  fi
+
+  if [[ -z "$profile" || "$profile" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing profile." >&2
+    exit 1
+  fi
+
+  if [[ -z "$region" || "$region" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing region." >&2
+    exit 1
+  fi
+
+  if [[ -z "$target" || "$target" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing target." >&2
+    exit 1
+  fi
+
+  if [[ -z "$host" || "$host" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing host." >&2
+    exit 1
+  fi
+
+  if [[ -z "$database" || "$database" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing database." >&2
+    exit 1
+  fi
+
+  if [[ -z "$remote_port" || "$remote_port" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing remotePort." >&2
+    exit 1
+  fi
+
+  if [[ -z "$local_port" || "$local_port" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing localPort." >&2
+    exit 1
+  fi
+
+  ensure_aws_login "$profile"
+
+  echo "Starting database tunnel:"
+  echo
+  echo "  tunnel:      $tunnel_name"
+  if [[ -n "$description" && "$description" != "null" ]]; then
+    echo "  description: $description"
+  fi
+  echo "  profile:     $profile"
+  echo "  region:      $region"
+  echo "  target:      $target"
+  echo "  remote:      $host:$remote_port"
+  echo "  local:       localhost:$local_port"
+  echo "  database:    $database"
+  echo "  db user:     $db_user"
+  echo
+  echo "Connect with:"
+  echo
+  echo "  psql -h localhost -p $local_port -U $db_user $database"
+  echo
+  echo "Press Ctrl-C to close the tunnel."
+  echo
+
+  aws ssm start-session \
+    --profile "$profile" \
+    --region "$region" \
+    --target "$target" \
+    --document-name AWS-StartPortForwardingSessionToRemoteHost \
+    --parameters "host=$host,portNumber=$remote_port,localPortNumber=$local_port"
+}
+
+main() {
+  require_command jq
+  require_command aws
+
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    list)
+      list_tunnels "$@"
+      ;;
+
+    open)
+      open_tunnel "$@"
+      ;;
+
+    -h|--help|help)
+      usage
+      ;;
+
+    *)
+      echo "Unknown command: $command" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

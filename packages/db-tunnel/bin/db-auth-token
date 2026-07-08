@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1
+  pwd
+)"
+
+default_config_file() {
+  local candidate
+
+  for candidate in \
+    "$SCRIPT_DIR/../share/db-tunnels.json" \
+    "$SCRIPT_DIR/../share/db-tunnel/db-tunnels.json" \
+    "$SCRIPT_DIR/db-tunnels.json"
+  do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  printf '%s\n' "$SCRIPT_DIR/../share/db-tunnels.json"
+}
+
+DEFAULT_CONFIG_FILE="$(default_config_file)"
+CONFIG_FILE="${DB_TUNNELS_CONFIG:-$DEFAULT_CONFIG_FILE}"
+
+usage() {
+  cat <<EOF
+Usage:
+  db-auth-token <name> [--db-user USER]
+
+Examples:
+  db-auth-token production-writer
+  db-auth-token staging --db-user app_user
+  PGPASSWORD="\$(db-auth-token production-writer)" psql -h localhost -p 15432 -U <user> production
+
+Config:
+  Reads profile, region, host, remotePort, and user from db-tunnels.json.
+
+Environment:
+  DB_TUNNELS_CONFIG      Override config file path.
+  DB_AUTH_TOKEN_DB_USER  Default database user override.
+  DB_TUNNEL_DB_USER      Backward-compatible database user override.
+EOF
+}
+
+require_command() {
+  local command_name="$1"
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Missing required command: $command_name" >&2
+    exit 1
+  fi
+}
+
+check_config() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+  fi
+}
+
+ensure_aws_login() {
+  local profile="$1"
+
+  if ! aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+    echo "AWS profile '$profile' is not currently authenticated." >&2
+    echo "Attempting AWS SSO login..." >&2
+    aws sso login --profile "$profile" >&2
+  fi
+}
+
+generate_token() {
+  local tunnel_name=""
+  local db_user_override=""
+
+  if [[ $# -lt 1 ]]; then
+    echo "Missing tunnel name." >&2
+    usage
+    exit 1
+  fi
+
+  tunnel_name="$1"
+  shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --db-user|--username|--user)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for $1." >&2
+          exit 1
+        fi
+        db_user_override="$2"
+        shift 2
+        ;;
+
+      -h|--help)
+        usage
+        exit 0
+        ;;
+
+      *)
+        echo "Unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  check_config
+
+  local exists
+  exists="$(jq -r --arg name "$tunnel_name" '.tunnels[$name] != null' "$CONFIG_FILE")"
+
+  if [[ "$exists" != "true" ]]; then
+    echo "Unknown tunnel: $tunnel_name" >&2
+    echo "Run db-tunnel list to see configured tunnels." >&2
+    exit 1
+  fi
+
+  local profile region host remote_port db_user
+
+  profile="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].profile' "$CONFIG_FILE")"
+  region="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].region' "$CONFIG_FILE")"
+  host="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].host' "$CONFIG_FILE")"
+  remote_port="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].remotePort' "$CONFIG_FILE")"
+  db_user="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].user // .tunnels[$name].username // .tunnels[$name].dbUser // ""' "$CONFIG_FILE")"
+
+  if [[ -n "$db_user_override" ]]; then
+    db_user="$db_user_override"
+  elif [[ -n "${DB_AUTH_TOKEN_DB_USER:-}" ]]; then
+    db_user="$DB_AUTH_TOKEN_DB_USER"
+  elif [[ -n "${DB_TUNNEL_DB_USER:-}" ]]; then
+    db_user="$DB_TUNNEL_DB_USER"
+  fi
+
+  if [[ -z "$profile" || "$profile" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing profile." >&2
+    exit 1
+  fi
+
+  if [[ -z "$region" || "$region" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing region." >&2
+    exit 1
+  fi
+
+  if [[ -z "$host" || "$host" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing host." >&2
+    exit 1
+  fi
+
+  if [[ -z "$remote_port" || "$remote_port" == "null" ]]; then
+    echo "Tunnel '$tunnel_name' is missing remotePort." >&2
+    exit 1
+  fi
+
+  if [[ -z "$db_user" || "$db_user" == "null" ]]; then
+    echo "Missing database user for IAM token generation." >&2
+    echo "Set user in the tunnel config, DB_AUTH_TOKEN_DB_USER, or pass --db-user USER." >&2
+    exit 1
+  fi
+
+  ensure_aws_login "$profile"
+
+  aws rds generate-db-auth-token \
+    --profile "$profile" \
+    --region "$region" \
+    --hostname "$host" \
+    --port "$remote_port" \
+    --username "$db_user"
+}
+
+main() {
+  require_command jq
+  require_command aws
+
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  case "$1" in
+    -h|--help|help)
+      usage
+      ;;
+
+    *)
+      generate_token "$@"
+      ;;
+  esac
+}
+
+main "$@"

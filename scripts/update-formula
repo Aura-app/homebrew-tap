@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage:
+  scripts/update-formula <package> <version> <sha256>
+EOF
+}
+
+if [[ $# -ne 3 ]]; then
+  usage >&2
+  exit 1
+fi
+
+package="$1"
+version="$2"
+sha256="$3"
+
+if [[ ! "$sha256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Invalid sha256: $sha256" >&2
+  exit 1
+fi
+
+repo_root="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1
+  pwd
+)"
+
+formula_path="$repo_root/Formula/$package.rb"
+if [[ ! -f "$formula_path" ]]; then
+  echo "Formula not found: $formula_path" >&2
+  exit 1
+fi
+
+tag="$package-v$version"
+url="https://github.com/aura-app/homebrew-tap/releases/download/$tag/$tag.tar.gz"
+tmp_file="$(mktemp)"
+trap 'rm -f "$tmp_file"' EXIT
+
+while IFS= read -r line; do
+  case "$line" in
+    "  version "*)
+      printf '  version "%s"\n' "$version"
+      ;;
+    "  url "*)
+      printf '  url "%s"\n' "$url"
+      ;;
+    "  sha256 "*)
+      printf '  sha256 "%s"\n' "$sha256"
+      ;;
+    *)
+      printf '%s\n' "$line"
+      ;;
+  esac
+done < "$formula_path" > "$tmp_file"
+
+mv "$tmp_file" "$formula_path"
+trap - EXIT

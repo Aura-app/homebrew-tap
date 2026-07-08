@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1
+  pwd
+)"
+
+default_config_file() {
+  local candidate
+
+  for candidate in \
+    "$SCRIPT_DIR/../share/db-tunnels.json" \
+    "$SCRIPT_DIR/../share/db-tunnel/db-tunnels.json" \
+    "$SCRIPT_DIR/db-tunnels.json"
+  do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  printf '%s\n' "$SCRIPT_DIR/../share/db-tunnel/db-tunnels.json"
+}
+
+DEFAULT_CONFIG_FILE="$(default_config_file)"
+CONFIG_FILE="${DB_TUNNELS_CONFIG:-$DEFAULT_CONFIG_FILE}"
+TUNNEL_NAME="production-writer"
+HOST="${PGHOST:-}"
+HOSTADDR="${PGHOSTADDR:-127.0.0.1}"
+PORT="${PGPORT:-}"
+DATABASE="${PGDATABASE:-}"
+USER="${PGUSER:-}"
+SSLMODE="${PGSSLMODE:-require}"
+GENERATE_TOKEN="true"
+PSQL_ARGS=()
+
+usage() {
+  cat <<EOF
+Usage:
+  tpsql [tunnel] [options] [-- psql-args...]
+
+Connects psql to a local db-tunnel endpoint using the database, user, local
+port, and remote hostname from db-tunnels.json. By default it generates an IAM
+database auth token and uses it as PGPASSWORD.
+
+Options:
+  --tunnel NAME        Tunnel config entry. Default: production-writer
+  --host HOST          PostgreSQL hostname. Default: PGHOST or tunnel host
+  --hostaddr ADDRESS   TCP address for the tunnel. Default: PGHOSTADDR or 127.0.0.1
+  --port PORT          PostgreSQL port. Default: PGPORT or tunnel localPort
+  --database NAME      PostgreSQL database. Default: PGDATABASE or tunnel database
+  --user USER          PostgreSQL user. Default: PGUSER or tunnel user
+  --sslmode MODE       PostgreSQL sslmode. Default: PGSSLMODE or require
+  --no-token           Do not generate an IAM token; use existing auth instead.
+  -h, --help           Show this help.
+
+Environment:
+  DB_TUNNELS_CONFIG    Override db-tunnels.json path.
+  PGHOST, PGHOSTADDR,
+  PGPORT, PGDATABASE,
+  PGUSER, PGSSLMODE,
+  PGPASSWORD           Standard psql connection settings.
+
+Examples:
+  db-tunnel open production-writer
+  tpsql production-writer
+  tpsql production --user iam_enabled_user
+  tpsql staging -- -c 'select now();'
+EOF
+}
+
+require_command() {
+  local command_name="$1"
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Missing required command: $command_name" >&2
+    exit 1
+  fi
+}
+
+check_config() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+  fi
+}
+
+read_tunnel_config() {
+  check_config
+
+  local exists
+  exists="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name] != null' "$CONFIG_FILE")"
+
+  if [[ "$exists" != "true" ]]; then
+    echo "Unknown tunnel: $TUNNEL_NAME" >&2
+    echo "Run db-tunnel list to see configured tunnels." >&2
+    exit 1
+  fi
+
+  local tunnel_host tunnel_port tunnel_database tunnel_user
+
+  tunnel_host="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].host' "$CONFIG_FILE")"
+  tunnel_port="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].localPort' "$CONFIG_FILE")"
+  tunnel_database="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].database // ""' "$CONFIG_FILE")"
+  tunnel_user="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].user // .tunnels[$name].username // .tunnels[$name].dbUser // ""' "$CONFIG_FILE")"
+
+  if [[ -z "$HOST" ]]; then
+    HOST="$tunnel_host"
+  fi
+
+  if [[ -z "$PORT" ]]; then
+    PORT="$tunnel_port"
+  fi
+
+  if [[ -z "$DATABASE" ]]; then
+    DATABASE="$tunnel_database"
+  fi
+
+  if [[ -z "$USER" ]]; then
+    USER="$tunnel_user"
+  fi
+}
+
+parse_args() {
+  if [[ $# -gt 0 && "$1" != -* ]]; then
+    TUNNEL_NAME="$1"
+    shift
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)
+        shift
+        PSQL_ARGS=("$@")
+        break
+        ;;
+
+      --tunnel)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --tunnel." >&2
+          exit 1
+        fi
+        TUNNEL_NAME="$2"
+        shift 2
+        ;;
+
+      --host)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --host." >&2
+          exit 1
+        fi
+        HOST="$2"
+        shift 2
+        ;;
+
+      --hostaddr)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --hostaddr." >&2
+          exit 1
+        fi
+        HOSTADDR="$2"
+        shift 2
+        ;;
+
+      --port)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --port." >&2
+          exit 1
+        fi
+        PORT="$2"
+        shift 2
+        ;;
+
+      --database)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --database." >&2
+          exit 1
+        fi
+        DATABASE="$2"
+        shift 2
+        ;;
+
+      --user)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --user." >&2
+          exit 1
+        fi
+        USER="$2"
+        shift 2
+        ;;
+
+      --sslmode)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --sslmode." >&2
+          exit 1
+        fi
+        SSLMODE="$2"
+        shift 2
+        ;;
+
+      --no-token)
+        GENERATE_TOKEN="false"
+        shift
+        ;;
+
+      -h|--help)
+        usage
+        exit 0
+        ;;
+
+      *)
+        echo "Unknown argument: $1" >&2
+        echo "Pass raw psql arguments after --." >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+}
+
+connect_psql() {
+  read_tunnel_config
+
+  if [[ -z "$PORT" || "$PORT" == "null" ]]; then
+    echo "Tunnel '$TUNNEL_NAME' is missing localPort, and PGPORT/--port was not set." >&2
+    exit 1
+  fi
+
+  if [[ -z "$HOST" || "$HOST" == "null" ]]; then
+    echo "Tunnel '$TUNNEL_NAME' is missing host, and PGHOST/--host was not set." >&2
+    exit 1
+  fi
+
+  if [[ -z "$HOSTADDR" || "$HOSTADDR" == "null" ]]; then
+    echo "PGHOSTADDR/--hostaddr cannot be empty when connecting through a tunnel." >&2
+    exit 1
+  fi
+
+  if [[ -z "$DATABASE" || "$DATABASE" == "null" ]]; then
+    echo "Tunnel '$TUNNEL_NAME' is missing database, and PGDATABASE/--database was not set." >&2
+    exit 1
+  fi
+
+  if [[ -z "$USER" || "$USER" == "null" ]]; then
+    echo "Tunnel '$TUNNEL_NAME' is missing user, and PGUSER/--user was not set." >&2
+    exit 1
+  fi
+
+  local conninfo="host=$HOST hostaddr=$HOSTADDR port=$PORT dbname=$DATABASE user=$USER sslmode=$SSLMODE"
+  local -a psql_args=("$conninfo")
+
+  psql_args+=("${PSQL_ARGS[@]}")
+
+  if [[ "$GENERATE_TOKEN" == "true" ]]; then
+    local password
+    local db_auth_token_command="${DB_AUTH_TOKEN_COMMAND:-}"
+
+    if [[ -z "$db_auth_token_command" ]]; then
+      if [[ -x "$SCRIPT_DIR/db-auth-token" ]]; then
+        db_auth_token_command="$SCRIPT_DIR/db-auth-token"
+      else
+        db_auth_token_command="db-auth-token"
+      fi
+    fi
+
+    password="$("$db_auth_token_command" "$TUNNEL_NAME" --db-user "$USER")"
+    exec env PGPASSWORD="$password" psql "${psql_args[@]}"
+  fi
+
+  exec psql "${psql_args[@]}"
+}
+
+main() {
+  require_command jq
+  require_command psql
+  parse_args "$@"
+  connect_psql
+}
+
+main "$@"
