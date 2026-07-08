@@ -51,6 +51,49 @@ require_command() {
   fi
 }
 
+ensure_session_manager_plugin() {
+  if command -v session-manager-plugin >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "Missing required command: session-manager-plugin" >&2
+  echo >&2
+
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Install it with Homebrew before opening a tunnel:" >&2
+    echo >&2
+    echo "  brew install --cask session-manager-plugin" >&2
+    exit 1
+  fi
+
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    echo "Install it before opening a tunnel:" >&2
+    echo >&2
+    echo "  brew install --cask session-manager-plugin" >&2
+    exit 1
+  fi
+
+  local response
+  read -r -p "Install session-manager-plugin with Homebrew now? [y/N] " response
+
+  case "$response" in
+    y|Y|yes|YES)
+      brew install --cask session-manager-plugin
+      ;;
+    *)
+      echo "Install it before opening a tunnel:" >&2
+      echo >&2
+      echo "  brew install --cask session-manager-plugin" >&2
+      exit 1
+      ;;
+  esac
+
+  if ! command -v session-manager-plugin >/dev/null 2>&1; then
+    echo "session-manager-plugin still was not found on PATH after installation." >&2
+    exit 1
+  fi
+}
+
 check_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "Config file not found: $CONFIG_FILE" >&2
@@ -84,6 +127,8 @@ ensure_aws_login() {
 open_tunnel() {
   local tunnel_name=""
   local local_port_override=""
+
+  ensure_session_manager_plugin
 
   if [[ $# -lt 1 ]]; then
     echo "Missing tunnel name." >&2

@@ -8,12 +8,20 @@ class DbTunnel < Formula
 
   depends_on "awscli"
   depends_on "jq"
-  depends_on "session-manager-plugin"
 
   def install
     bin.install "bin/db-tunnel"
     bin.install "bin/db-auth-token"
     pkgshare.install "share/db-tunnels.json"
+  end
+
+  def caveats
+    <<~EOS
+      db-tunnel opens AWS SSM sessions and requires Amazon's Session Manager
+      plugin. If it is missing, db-tunnel will offer to install it with:
+
+        brew install --cask session-manager-plugin
+    EOS
   end
 
   test do
