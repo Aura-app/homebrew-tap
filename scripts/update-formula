@@ -38,13 +38,24 @@ url="https://github.com/aura-app/homebrew-tap/releases/download/$tag/$tag.tar.gz
 tmp_file="$(mktemp)"
 trap 'rm -f "$tmp_file"' EXIT
 
+skip_url_strategy_line="false"
+
 while IFS= read -r line; do
+  if [[ "$skip_url_strategy_line" == "true" ]]; then
+    skip_url_strategy_line="false"
+    if [[ "$line" == "      using: GitHubCliDownloadStrategy" ]]; then
+      continue
+    fi
+  fi
+
   case "$line" in
     "  version "*)
       printf '  version "%s"\n' "$version"
       ;;
     "  url "*)
-      printf '  url "%s"\n' "$url"
+      printf '  url "%s",\n' "$url"
+      printf '      using: GitHubCliDownloadStrategy\n'
+      skip_url_strategy_line="true"
       ;;
     "  sha256 "*)
       printf '  sha256 "%s"\n' "$sha256"
