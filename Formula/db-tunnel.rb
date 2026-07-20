@@ -58,11 +58,11 @@ end
 class DbTunnel < Formula
   desc "Aura database tunnel helper"
   homepage "https://github.com/aura-app/homebrew-tap"
-  version "0.1.3"
+  version "0.1.4"
 
-  url "https://github.com/aura-app/homebrew-tap/releases/download/db-tunnel-v0.1.3/db-tunnel-v0.1.3.tar.gz",
+  url "https://github.com/aura-app/homebrew-tap/releases/download/db-tunnel-v0.1.4/db-tunnel-v0.1.4.tar.gz",
       using: GitHubCliDownloadStrategy
-  sha256 "f0563aff30e100ac797b58d6805c5aba94b55ab618dd0c26374eb6b3ac5dea11"
+  sha256 "823fee9a2d80c2f566fec76a7dc7e83f00f68ab8c3013c5f8837a348d4ef5732"
 
   depends_on "awscli"
   depends_on "jq"
