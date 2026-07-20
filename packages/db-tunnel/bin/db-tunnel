@@ -247,9 +247,13 @@ open_tunnel() {
   echo "Connect with:"
   echo
   echo "  PGUSER=\"\$DB_TUNNEL_DB_USER\" PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
-  echo
-  echo "  (set DB_TUNNEL_DB_USER once, e.g. in your shell profile, to your own"
-  echo "  database role — db-auth-token and psql both pick it up automatically)"
+
+  if [[ -z "${DB_TUNNEL_DB_USER:-}" ]]; then
+    echo
+    echo "  (set DB_TUNNEL_DB_USER once, e.g. in your shell profile, to your own"
+    echo "  database role — db-auth-token and psql both pick it up automatically)"
+  fi
+
   echo
   echo "Press Ctrl-C to close the tunnel."
   echo
