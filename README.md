@@ -41,6 +41,62 @@ tap definitions if Homebrew's automatic update ran recently (it's throttled).
 If a new version doesn't show up, run `brew update` explicitly first, then
 retry the upgrade.
 
+## Connecting To A Database
+
+Every tunnel in `db-tunnels.json` goes through an IAM-auth RDS Proxy shared
+by many identities, so there's no shared password — you authenticate as
+your own database role via a short-lived IAM token.
+
+1. **Set `PGUSER` once**, e.g. in `~/.bashrc`/`~/.zshrc`, to your own
+   database role:
+
+   ```sh
+   export PGUSER=<your-database-role>
+   ```
+
+   `psql` reads this natively, and so does `db-auth-token` — one setting
+   covers both.
+
+2. **See what's available:**
+
+   ```sh
+   db-tunnel list
+   ```
+
+3. **Open a tunnel.** This blocks (it's holding the SSM port-forward open),
+   so run it in its own terminal tab/pane and leave it running:
+
+   ```sh
+   db-tunnel open dev
+   ```
+
+   It prints a ready-to-run connect command using the `PGUSER` you set in
+   step 1:
+
+   ```text
+   Connect with:
+
+     PGPASSWORD="$(db-auth-token dev)" psql -h localhost -p 15432 devtest
+   ```
+
+4. **In a separate terminal**, run the command exactly as printed:
+
+   ```sh
+   PGPASSWORD="$(db-auth-token dev)" psql -h localhost -p 15432 devtest
+   ```
+
+   Each run generates a fresh, short-lived IAM token — nothing to remember
+   or rotate. `tpsql` does this same connect step in one command if you'd
+   rather not copy-paste it (it still needs the tunnel from step 3 open in
+   another terminal):
+
+   ```sh
+   tpsql dev
+   ```
+
+Press Ctrl-C in the `db-tunnel open` terminal to close the tunnel when
+you're done with it.
+
 ## Layout
 
 ```text
