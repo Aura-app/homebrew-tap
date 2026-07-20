@@ -23,16 +23,18 @@ release with its normal downloader alone.
    lets `brew tap` clone the private repo, separately from `gh` itself being
    used to fetch private release assets.
 
-3. **Tap and install:**
+3. **Tap, trust, and install:**
 
    ```sh
    brew tap aura-app/tap
+   brew trust aura-app/tap
    brew install db-tunnel
    ```
 
-There is no separate "trust" step — once `gh auth login` is done, Homebrew's
-custom download strategy in `Formula/db-tunnel.rb` shells out to `gh release
-download` automatically for any private release asset.
+   The trust step is needed because `Formula/db-tunnel.rb` defines a custom
+   download strategy (it shells out to `gh release download` to fetch
+   private release assets) — Homebrew gates formulas with custom code like
+   this behind an explicit trust step before it'll run them.
 
 **Upgrading:** `brew upgrade <package>` alone can silently skip refreshing
 tap definitions if Homebrew's automatic update ran recently (it's throttled).
