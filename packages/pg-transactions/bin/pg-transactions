@@ -48,7 +48,8 @@ Shows PostgreSQL client connections through a local db-tunnel endpoint as
 newline-delimited JSON. By default this connects to the dev writer tunnel's
 local port and shows active sessions. Every tunnel in db-tunnels.json now
 goes through an IAM-auth RDS Proxy shared by many identities, so you always
-provide your own database role via --user/PGUSER or DB_TUNNEL_DB_USER.
+provide your own database role, most simply via PGUSER (the standard psql
+variable).
 
 Options:
   --idle               Include normal idle sessions.
@@ -69,13 +70,14 @@ Options:
 
 Environment:
   DB_TUNNELS_CONFIG    Override db-tunnels.json path.
-  DB_TUNNEL_DB_USER    Your own database role — set this once (e.g. in your
-                        shell profile) instead of passing --user every time.
-                        Also read by db-tunnel, db-auth-token, and tpsql.
   PGHOST, PGHOSTADDR,
   PGPORT, PGDATABASE,
   PGUSER, PGSSLMODE,
-  PGPASSWORD           Standard psql connection settings.
+  PGPASSWORD           Standard psql connection settings — set PGUSER once
+                       (e.g. in your shell profile) to your own database
+                       role instead of passing --user every time.
+  DB_TUNNEL_DB_USER    Fallback if PGUSER isn't set. Also read by db-tunnel,
+                       db-auth-token, and tpsql.
 
 Examples:
   db-tunnel open dev-writer

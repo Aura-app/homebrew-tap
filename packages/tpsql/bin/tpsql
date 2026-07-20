@@ -56,13 +56,14 @@ Options:
 
 Environment:
   DB_TUNNELS_CONFIG    Override db-tunnels.json path.
-  DB_TUNNEL_DB_USER    Your own database role — set this once (e.g. in your
-                        shell profile) instead of passing --user every time.
-                        Also read by db-tunnel and db-auth-token.
   PGHOST, PGHOSTADDR,
   PGPORT, PGDATABASE,
   PGUSER, PGSSLMODE,
-  PGPASSWORD           Standard psql connection settings.
+  PGPASSWORD           Standard psql connection settings — set PGUSER once
+                       (e.g. in your shell profile) to your own database
+                       role and both psql and db-auth-token pick it up.
+  DB_TUNNEL_DB_USER    Fallback if PGUSER isn't set. Also read by db-tunnel,
+                       db-auth-token, and pg-transactions.
 
 Examples:
   db-tunnel open dev-writer

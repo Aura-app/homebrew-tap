@@ -39,10 +39,9 @@ Examples:
 
 Environment:
   DB_TUNNELS_CONFIG  Override config file path.
-  DB_TUNNEL_DB_USER  Your own database role — set this once (e.g. in your
-                     shell profile) and the suggested connect command will
-                     use it automatically instead of a placeholder. Also
-                     read by db-auth-token and tpsql.
+  PGUSER             Your own database role — the standard psql variable;
+                     set it once (e.g. in your shell profile) and both
+                     psql and db-auth-token pick it up automatically.
 EOF
 }
 
@@ -246,12 +245,13 @@ open_tunnel() {
   echo
   echo "Connect with:"
   echo
-  echo "  PGUSER=\"\$DB_TUNNEL_DB_USER\" PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
+  echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
 
-  if [[ -z "${DB_TUNNEL_DB_USER:-}" ]]; then
+  if [[ -z "${PGUSER:-}" ]]; then
     echo
-    echo "  (set DB_TUNNEL_DB_USER once, e.g. in your shell profile, to your own"
-    echo "  database role — db-auth-token and psql both pick it up automatically)"
+    echo "  (set PGUSER once, e.g. in your shell profile, to your own database"
+    echo "  role — it's the standard psql variable, so both psql and"
+    echo "  db-auth-token pick it up automatically)"
   fi
 
   echo
