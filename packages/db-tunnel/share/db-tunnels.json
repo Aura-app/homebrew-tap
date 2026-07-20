@@ -1,7 +1,27 @@
 {
   "tunnels": {
     "dev": {
-      "description": "Development PostgreSQL",
+      "description": "Development PostgreSQL (read-only, via IAM-auth RDS Proxy) — pass --db-user for your own role",
+      "profile": "default",
+      "region": "eu-west-1",
+      "target": "i-0ac303710d4aaedc9",
+      "host": "dev-test-rds-iam-proxy-read-only.endpoint.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
+      "database": "devtest",
+      "remotePort": 5432,
+      "localPort": 15432
+    },
+    "dev-writer": {
+      "description": "Development Writer PostgreSQL (via IAM-auth RDS Proxy) — pass --db-user for your own role",
+      "profile": "default",
+      "region": "eu-west-1",
+      "target": "i-0ac303710d4aaedc9",
+      "host": "dev-test-rds-iam-proxy.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
+      "database": "devtest",
+      "remotePort": 5432,
+      "localPort": 15432
+    },
+    "devtest-legacy": {
+      "description": "Development PostgreSQL, direct-to-cluster reader (legacy, password auth as rappid — not part of the new IAM role scheme)",
       "profile": "default",
       "region": "eu-west-1",
       "target": "i-0ac303710d4aaedc9",
@@ -9,10 +29,10 @@
       "database": "devtest",
       "user": "rappid",
       "remotePort": 5432,
-      "localPort": 15432
+      "localPort": 15434
     },
-    "dev-writer": {
-      "description": "Development Writer PostgreSQL",
+    "devtest-legacy-writer": {
+      "description": "Development Writer PostgreSQL, direct-to-cluster (legacy, password auth as rappid — not part of the new IAM role scheme)",
       "profile": "default",
       "region": "eu-west-1",
       "target": "i-0ac303710d4aaedc9",
@@ -20,7 +40,7 @@
       "database": "devtest",
       "user": "rappid",
       "remotePort": 5432,
-      "localPort": 15432
+      "localPort": 15435
     },
     "staging": {
       "description": "Staging PostgreSQL",
