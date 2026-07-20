@@ -2,6 +2,43 @@
 
 Homebrew tap and package source for internal Aura command-line tools.
 
+## Installing
+
+This tap and its release assets are private, so installing needs GitHub
+access to this repo plus the GitHub CLI — Homebrew can't download a private
+release with its normal downloader alone.
+
+1. **Get GitHub access.** You need read access to `aura-app/homebrew-tap`
+   (org membership or a direct collaborator invite) — ask in
+   `#tech-support` if you don't have it yet.
+2. **Install and authenticate the GitHub CLI**, if you haven't already:
+
+   ```sh
+   brew install gh
+   gh auth login
+   ```
+
+   When prompted, let it authenticate Git operations with your GitHub
+   credentials too (or run `gh auth setup-git` afterwards) — this is what
+   lets `brew tap` clone the private repo, separately from `gh` itself being
+   used to fetch private release assets.
+
+3. **Tap and install:**
+
+   ```sh
+   brew tap aura-app/tap
+   brew install db-tunnel
+   ```
+
+There is no separate "trust" step — once `gh auth login` is done, Homebrew's
+custom download strategy in `Formula/db-tunnel.rb` shells out to `gh release
+download` automatically for any private release asset.
+
+**Upgrading:** `brew upgrade <package>` alone can silently skip refreshing
+tap definitions if Homebrew's automatic update ran recently (it's throttled).
+If a new version doesn't show up, run `brew update` explicitly first, then
+retry the upgrade.
+
 ## Layout
 
 ```text
