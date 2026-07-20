@@ -1,7 +1,7 @@
 {
   "tunnels": {
     "dev": {
-      "description": "Development PostgreSQL (read-only, via IAM-auth RDS Proxy) — pass --db-user for your own role",
+      "description": "Development PostgreSQL (read-only, via IAM-auth RDS Proxy) — use your own database role",
       "profile": "default",
       "region": "eu-west-1",
       "target": "i-0ac303710d4aaedc9",
@@ -11,78 +11,12 @@
       "localPort": 15432
     },
     "dev-writer": {
-      "description": "Development Writer PostgreSQL (via IAM-auth RDS Proxy) — pass --db-user for your own role",
+      "description": "Development Writer PostgreSQL (via IAM-auth RDS Proxy) — use your own database role",
       "profile": "default",
       "region": "eu-west-1",
       "target": "i-0ac303710d4aaedc9",
       "host": "dev-test-rds-iam-proxy.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
       "database": "devtest",
-      "remotePort": 5432,
-      "localPort": 15432
-    },
-    "devtest-legacy": {
-      "description": "Development PostgreSQL, direct-to-cluster reader (legacy, password auth as rappid — not part of the new IAM role scheme)",
-      "profile": "default",
-      "region": "eu-west-1",
-      "target": "i-0ac303710d4aaedc9",
-      "host": "devtest-read-replica.cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
-      "database": "devtest",
-      "user": "rappid",
-      "remotePort": 5432,
-      "localPort": 15434
-    },
-    "devtest-legacy-writer": {
-      "description": "Development Writer PostgreSQL, direct-to-cluster (legacy, password auth as rappid — not part of the new IAM role scheme)",
-      "profile": "default",
-      "region": "eu-west-1",
-      "target": "i-0ac303710d4aaedc9",
-      "host": "devtest-cluster.cluster-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
-      "database": "devtest",
-      "user": "rappid",
-      "remotePort": 5432,
-      "localPort": 15435
-    },
-    "staging": {
-      "description": "Staging PostgreSQL",
-      "profile": "default",
-      "region": "eu-west-1",
-      "target": "i-0dfcbe8d61ae69357",
-      "host": "staging-reader.cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
-      "database": "staging",
-      "user": "pgevowfshvjcqmkr",
-      "remotePort": 5432,
-      "localPort": 15432
-    },
-    "staging-writer": {
-      "description": "Staging Writer PostgreSQL",
-      "profile": "default",
-      "region": "eu-west-1",
-      "target": "i-0dfcbe8d61ae69357",
-      "host": "staging-primary.cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
-      "database": "staging",
-      "user": "pgevowfshvjcqmkr",
-      "remotePort": 5432,
-      "localPort": 15432
-    },
-    "production": {
-      "description": "Production PostgreSQL",
-      "profile": "default",
-      "region": "eu-west-1",
-      "target": "i-0110f90e1da52af1f",
-      "host": "production-reader.cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
-      "database": "production",
-      "user": "refbskeccryqjsci",
-      "remotePort": 5432,
-      "localPort": 15432
-    },
-    "production-writer": {
-      "description": "Production Writer PostgreSQL",
-      "profile": "default",
-      "region": "eu-west-1",
-      "target": "i-0110f90e1da52af1f",
-      "database": "production",
-      "host": "production.cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
-      "user": "refbskeccryqjsci",
       "remotePort": 5432,
       "localPort": 15432
     }

@@ -32,17 +32,22 @@ Usage:
   db-auth-token <name> [--db-user USER]
 
 Examples:
-  db-auth-token production-writer
-  db-auth-token staging --db-user app_user
-  PGPASSWORD="\$(db-auth-token production-writer)" psql -h localhost -p 15432 -U <user> production
+  db-auth-token dev-writer --db-user shauns
+  PGPASSWORD="\$(db-auth-token dev-writer --db-user shauns)" psql -h localhost -p 15432 -U shauns devtest
 
 Config:
-  Reads profile, region, host, remotePort, and user from db-tunnels.json.
+  Reads profile, region, host, and remotePort from db-tunnels.json. There is
+  no per-tunnel default user in config anymore — every tunnel here goes
+  through an IAM-auth RDS Proxy shared by many identities, so you always
+  provide your own database role via --db-user or DB_TUNNEL_DB_USER.
 
 Environment:
   DB_TUNNELS_CONFIG      Override config file path.
-  DB_AUTH_TOKEN_DB_USER  Default database user override.
-  DB_TUNNEL_DB_USER      Backward-compatible database user override.
+  DB_TUNNEL_DB_USER      Your own database role — set this once (e.g. in
+                         your shell profile) instead of passing --db-user
+                         every time. Also read by db-tunnel and tpsql.
+  DB_AUTH_TOKEN_DB_USER  Override specific to this command, if you ever need
+                         a different user here than DB_TUNNEL_DB_USER.
 EOF
 }
 
@@ -158,7 +163,7 @@ generate_token() {
 
   if [[ -z "$db_user" || "$db_user" == "null" ]]; then
     echo "Missing database user for IAM token generation." >&2
-    echo "Set user in the tunnel config, DB_AUTH_TOKEN_DB_USER, or pass --db-user USER." >&2
+    echo "Pass --db-user USER, or set DB_TUNNEL_DB_USER (or DB_AUTH_TOKEN_DB_USER)." >&2
     exit 1
   fi
 
