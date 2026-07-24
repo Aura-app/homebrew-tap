@@ -7,7 +7,7 @@ class Tpsql < Formula
 
   url "https://github.com/aura-app/homebrew-tap/releases/download/tpsql-v0.1.1/tpsql-v0.1.1.tar.gz",
       using: GitHubCliDownloadStrategy
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "67bd5a7c38931d58664dfe8ce8d2cb6cad01c01fa1108b6ba0ce2d8c11e23ff1"
 
   depends_on "db-tunnel"
   depends_on "jq"
