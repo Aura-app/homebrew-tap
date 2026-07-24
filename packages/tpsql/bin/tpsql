@@ -243,7 +243,9 @@ connect_psql() {
   local conninfo="host=$HOST hostaddr=$HOSTADDR port=$PORT dbname=$DATABASE user=$USER sslmode=$SSLMODE"
   local -a psql_args=("$conninfo")
 
-  psql_args+=("${PSQL_ARGS[@]}")
+  if [[ ${#PSQL_ARGS[@]} -gt 0 ]]; then
+    psql_args+=("${PSQL_ARGS[@]}")
+  fi
 
   local password
   local db_auth_token_command="${DB_AUTH_TOKEN_COMMAND:-}"
