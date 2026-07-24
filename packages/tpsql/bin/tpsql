@@ -101,12 +101,11 @@ read_tunnel_config() {
     exit 1
   fi
 
-  local tunnel_host tunnel_port tunnel_database tunnel_user
+  local tunnel_host tunnel_port tunnel_database
 
   tunnel_host="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].host' "$CONFIG_FILE")"
   tunnel_port="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].localPort' "$CONFIG_FILE")"
   tunnel_database="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].database // ""' "$CONFIG_FILE")"
-  tunnel_user="$(jq -r --arg name "$TUNNEL_NAME" '.tunnels[$name].user // .tunnels[$name].username // .tunnels[$name].dbUser // ""' "$CONFIG_FILE")"
 
   if [[ -z "$HOST" ]]; then
     HOST="$tunnel_host"
@@ -118,10 +117,6 @@ read_tunnel_config() {
 
   if [[ -z "$DATABASE" ]]; then
     DATABASE="$tunnel_database"
-  fi
-
-  if [[ -z "$USER" ]]; then
-    USER="$tunnel_user"
   fi
 }
 

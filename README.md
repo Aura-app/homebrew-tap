@@ -29,6 +29,7 @@ release with its normal downloader alone.
    brew tap aura-app/tap
    brew trust aura-app/tap
    brew install db-tunnel
+   brew install tpsql
    ```
 
    The trust step is needed because `Formula/db-tunnel.rb` defines a custom
@@ -102,6 +103,9 @@ you're done with it.
 ```text
 Formula/
   db-tunnel.rb
+  tpsql.rb
+  lib/
+    github_cli_download_strategy.rb
 packages/
   db-tunnel/
     bin/
