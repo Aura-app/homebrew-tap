@@ -32,17 +32,26 @@ Usage:
   db-auth-token <name> [--db-user USER]
 
 Examples:
-  db-auth-token production-writer
-  db-auth-token staging --db-user app_user
-  PGPASSWORD="\$(db-auth-token production-writer)" psql -h localhost -p 15432 -U <user> production
+  export PGUSER=shauns   # once, e.g. in your shell profile
+  PGPASSWORD="\$(db-auth-token dev-writer)" psql -h localhost -p 15432 devtest
 
 Config:
-  Reads profile, region, host, remotePort, and user from db-tunnels.json.
+  Reads profile, region, host, and remotePort from db-tunnels.json. There is
+  no per-tunnel default user in config anymore — every tunnel here goes
+  through an IAM-auth RDS Proxy shared by many identities, so you always
+  provide your own database role, most simply by setting PGUSER — the same
+  variable psql itself reads, so one setting configures both.
 
 Environment:
   DB_TUNNELS_CONFIG      Override config file path.
-  DB_AUTH_TOKEN_DB_USER  Default database user override.
-  DB_TUNNEL_DB_USER      Backward-compatible database user override.
+  PGUSER                 Your own database role — the standard psql
+                         variable; set it once and both psql and this
+                         command pick it up automatically.
+  DB_AUTH_TOKEN_DB_USER  Override specific to this command, if you ever need
+                         a different user here than PGUSER.
+  DB_TUNNEL_DB_USER      Lower-priority fallback if neither PGUSER nor
+                         DB_AUTH_TOKEN_DB_USER is set. Also read by
+                         db-tunnel, tpsql, and pg-transactions.
 EOF
 }
 
@@ -138,6 +147,8 @@ generate_token() {
     db_user="$db_user_override"
   elif [[ -n "${DB_AUTH_TOKEN_DB_USER:-}" ]]; then
     db_user="$DB_AUTH_TOKEN_DB_USER"
+  elif [[ -n "${PGUSER:-}" ]]; then
+    db_user="$PGUSER"
   elif [[ -n "${DB_TUNNEL_DB_USER:-}" ]]; then
     db_user="$DB_TUNNEL_DB_USER"
   fi
@@ -164,7 +175,7 @@ generate_token() {
 
   if [[ -z "$db_user" || "$db_user" == "null" ]]; then
     echo "Missing database user for IAM token generation." >&2
-    echo "Set user in the tunnel config, DB_AUTH_TOKEN_DB_USER, or pass --db-user USER." >&2
+    echo "Set PGUSER (recommended), pass --db-user USER, or set DB_AUTH_TOKEN_DB_USER/DB_TUNNEL_DB_USER." >&2
     exit 1
   fi
 

@@ -35,10 +35,13 @@ Usage:
 Examples:
   db-tunnel list
   db-tunnel open dev
-  db-tunnel open staging --local-port 15440
+  db-tunnel open dev-writer --local-port 15440
 
 Environment:
   DB_TUNNELS_CONFIG  Override config file path.
+  PGUSER             Your own database role — the standard psql variable;
+                     set it once (e.g. in your shell profile) and both
+                     psql and db-auth-token pick it up automatically.
 EOF
 }
 
@@ -110,7 +113,7 @@ list_tunnels() {
   jq -r '
     .tunnels
     | to_entries[]
-    | "  \(.key)\n    description: \(.value.description // "-")\n    local:       localhost:\(.value.localPort)\n    remote:      \(.value.host):\(.value.remotePort)\n    database:    \(.value.database // "-")\n    profile:     \(.value.profile)\n    user:        \(.value.user // "-")\n"
+    | "  \(.key)\n    description: \(.value.description // "-")\n    local:       localhost:\(.value.localPort)\n    remote:      \(.value.host):\(.value.remotePort)\n    database:    \(.value.database // "-")\n    profile:     \(.value.profile)\n"
   ' "$CONFIG_FILE"
 }
 
@@ -188,7 +191,7 @@ open_tunnel() {
     exit 1
   fi
 
-  local profile region target host database remote_port local_port description db_user
+  local profile region target host database remote_port local_port description
 
   profile="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].profile' "$CONFIG_FILE")"
   region="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].region' "$CONFIG_FILE")"
@@ -198,7 +201,6 @@ open_tunnel() {
   remote_port="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].remotePort' "$CONFIG_FILE")"
   local_port="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].localPort' "$CONFIG_FILE")"
   description="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].description // ""' "$CONFIG_FILE")"
-  db_user="$(jq -r --arg name "$tunnel_name" '.tunnels[$name].user // .tunnels[$name].username // .tunnels[$name].dbUser // ""' "$CONFIG_FILE")"
 
   if [[ -n "$local_port_override" ]]; then
     local_port="$local_port_override"
@@ -254,17 +256,18 @@ open_tunnel() {
   echo "  remote:      $host:$remote_port"
   echo "  local:       localhost:$local_port"
   echo "  database:    $database"
-  if [[ -n "$db_user" && "$db_user" != "null" ]]; then
-    echo "  db user:     $db_user"
-  fi
   echo
   echo "Connect with:"
   echo
-  if [[ -n "$db_user" && "$db_user" != "null" ]]; then
-    echo "  psql -h localhost -p $local_port -U $db_user $database"
-  else
-    echo "  psql -h localhost -p $local_port $database"
+  echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
+
+  if [[ -z "${PGUSER:-}" ]]; then
+    echo
+    echo "  (set PGUSER once, e.g. in your shell profile, to your own database"
+    echo "  role — it's the standard psql variable, so both psql and"
+    echo "  db-auth-token pick it up automatically)"
   fi
+
   echo
   echo "Press Ctrl-C to close the tunnel."
   echo

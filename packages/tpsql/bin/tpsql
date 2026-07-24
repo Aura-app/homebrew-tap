@@ -25,14 +25,13 @@ default_config_file() {
 
 DEFAULT_CONFIG_FILE="$(default_config_file)"
 CONFIG_FILE="${DB_TUNNELS_CONFIG:-$DEFAULT_CONFIG_FILE}"
-TUNNEL_NAME="production-writer"
+TUNNEL_NAME="dev-writer"
 HOST="${PGHOST:-}"
 HOSTADDR="${PGHOSTADDR:-127.0.0.1}"
 PORT="${PGPORT:-}"
 DATABASE="${PGDATABASE:-}"
-USER="${PGUSER:-}"
+USER="${PGUSER:-${DB_TUNNEL_DB_USER:-}}"
 SSLMODE="${PGSSLMODE:-require}"
-GENERATE_TOKEN="true"
 PSQL_ARGS=()
 
 usage() {
@@ -40,19 +39,19 @@ usage() {
 Usage:
   tpsql [tunnel] [options] [-- psql-args...]
 
-Connects psql to a local db-tunnel endpoint using the database, user, local
-port, and remote hostname from db-tunnels.json. By default it generates an IAM
-database auth token and uses it as PGPASSWORD.
+Connects psql to a local db-tunnel endpoint using the database, local port,
+and remote hostname from db-tunnels.json. Always generates an IAM database
+auth token and uses it as PGPASSWORD — there is no password-auth fallback,
+every tunnel here goes through an IAM-auth RDS Proxy.
 
 Options:
-  --tunnel NAME        Tunnel config entry. Default: production-writer
+  --tunnel NAME        Tunnel config entry. Default: dev-writer
   --host HOST          PostgreSQL hostname. Default: PGHOST or tunnel host
   --hostaddr ADDRESS   TCP address for the tunnel. Default: PGHOSTADDR or 127.0.0.1
   --port PORT          PostgreSQL port. Default: PGPORT or tunnel localPort
   --database NAME      PostgreSQL database. Default: PGDATABASE or tunnel database
-  --user USER          PostgreSQL user. Default: PGUSER or tunnel user
+  --user USER          Your database role. Default: PGUSER or DB_TUNNEL_DB_USER
   --sslmode MODE       PostgreSQL sslmode. Default: PGSSLMODE or require
-  --no-token           Do not generate an IAM token; use existing auth instead.
   -h, --help           Show this help.
 
 Environment:
@@ -60,13 +59,17 @@ Environment:
   PGHOST, PGHOSTADDR,
   PGPORT, PGDATABASE,
   PGUSER, PGSSLMODE,
-  PGPASSWORD           Standard psql connection settings.
+  PGPASSWORD           Standard psql connection settings — set PGUSER once
+                       (e.g. in your shell profile) to your own database
+                       role and both psql and db-auth-token pick it up.
+  DB_TUNNEL_DB_USER    Fallback if PGUSER isn't set. Also read by db-tunnel,
+                       db-auth-token, and pg-transactions.
 
 Examples:
-  db-tunnel open production-writer
-  tpsql production-writer
-  tpsql production --user iam_enabled_user
-  tpsql staging -- -c 'select now();'
+  db-tunnel open dev-writer
+  tpsql dev-writer
+  tpsql dev --user justinsw
+  tpsql dev-writer -- -c 'select now();'
 EOF
 }
 
@@ -199,11 +202,6 @@ parse_args() {
         shift 2
         ;;
 
-      --no-token)
-        GENERATE_TOKEN="false"
-        shift
-        ;;
-
       -h|--help)
         usage
         exit 0
@@ -252,23 +250,19 @@ connect_psql() {
 
   psql_args+=("${PSQL_ARGS[@]}")
 
-  if [[ "$GENERATE_TOKEN" == "true" ]]; then
-    local password
-    local db_auth_token_command="${DB_AUTH_TOKEN_COMMAND:-}"
+  local password
+  local db_auth_token_command="${DB_AUTH_TOKEN_COMMAND:-}"
 
-    if [[ -z "$db_auth_token_command" ]]; then
-      if [[ -x "$SCRIPT_DIR/db-auth-token" ]]; then
-        db_auth_token_command="$SCRIPT_DIR/db-auth-token"
-      else
-        db_auth_token_command="db-auth-token"
-      fi
+  if [[ -z "$db_auth_token_command" ]]; then
+    if [[ -x "$SCRIPT_DIR/db-auth-token" ]]; then
+      db_auth_token_command="$SCRIPT_DIR/db-auth-token"
+    else
+      db_auth_token_command="db-auth-token"
     fi
-
-    password="$("$db_auth_token_command" "$TUNNEL_NAME" --db-user "$USER")"
-    exec env PGPASSWORD="$password" psql "${psql_args[@]}"
   fi
 
-  exec psql "${psql_args[@]}"
+  password="$("$db_auth_token_command" "$TUNNEL_NAME" --db-user "$USER")"
+  exec env PGPASSWORD="$password" psql "${psql_args[@]}"
 }
 
 main() {
