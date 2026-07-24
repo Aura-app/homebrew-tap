@@ -118,9 +118,9 @@ ensure_aws_login() {
   local profile="$1"
 
   if ! aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
-    echo "AWS profile '$profile' is not currently authenticated."
-    echo "Attempting AWS SSO login..."
-    aws sso login --profile "$profile"
+    echo "AWS profile '$profile' is not currently authenticated." >&2
+    echo "Attempting AWS SSO login..." >&2
+    aws sso login --profile "$profile" >&2
   fi
 }
 
@@ -128,10 +128,19 @@ open_tunnel() {
   local tunnel_name=""
   local local_port_override=""
 
-  ensure_session_manager_plugin
-
   if [[ $# -lt 1 ]]; then
     echo "Missing tunnel name." >&2
+    usage
+    exit 1
+  fi
+
+  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+    exit 0
+  fi
+
+  if [[ "$1" == -* ]]; then
+    echo "First argument must be the tunnel name, got: $1" >&2
     usage
     exit 1
   fi
@@ -144,6 +153,10 @@ open_tunnel() {
       --local-port)
         if [[ $# -lt 2 ]]; then
           echo "Missing value for --local-port." >&2
+          exit 1
+        fi
+        if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+          echo "Invalid value for --local-port: $2" >&2
           exit 1
         fi
         local_port_override="$2"
@@ -226,6 +239,7 @@ open_tunnel() {
     exit 1
   fi
 
+  ensure_session_manager_plugin
   ensure_aws_login "$profile"
 
   echo "Starting database tunnel:"
@@ -240,11 +254,17 @@ open_tunnel() {
   echo "  remote:      $host:$remote_port"
   echo "  local:       localhost:$local_port"
   echo "  database:    $database"
-  echo "  db user:     $db_user"
+  if [[ -n "$db_user" && "$db_user" != "null" ]]; then
+    echo "  db user:     $db_user"
+  fi
   echo
   echo "Connect with:"
   echo
-  echo "  psql -h localhost -p $local_port -U $db_user $database"
+  if [[ -n "$db_user" && "$db_user" != "null" ]]; then
+    echo "  psql -h localhost -p $local_port -U $db_user $database"
+  else
+    echo "  psql -h localhost -p $local_port $database"
+  fi
   echo
   echo "Press Ctrl-C to close the tunnel."
   echo
