@@ -3,11 +3,11 @@ require_relative "lib/github_cli_download_strategy"
 class DbTunnel < Formula
   desc "Aura database tunnel helper"
   homepage "https://github.com/aura-app/homebrew-tap"
-  version "0.2.0"
+  version "0.2.1"
 
-  url "https://github.com/aura-app/homebrew-tap/releases/download/db-tunnel-v0.2.0/db-tunnel-v0.2.0.tar.gz",
+  url "https://github.com/aura-app/homebrew-tap/releases/download/db-tunnel-v0.2.1/db-tunnel-v0.2.1.tar.gz",
       using: GitHubCliDownloadStrategy
-  sha256 "5232e085ebc0f8a3a97b160d03a5eb1925d1ad15d4c836d3a326f77546fd2b19"
+  sha256 "5805ed4594d9de011e80ae936cc667dc5b26f8cb4eea8963e3f9be0d27188682"
 
   depends_on "awscli"
   depends_on "jq"
