@@ -278,7 +278,6 @@ wait_for_tunnel() {
       else
         status=$?
       fi
-      TUNNEL_PID=""
       echo "Database tunnel exited before local port $local_port became ready (status $status)." >&2
       return 1
     fi
@@ -300,8 +299,12 @@ cleanup_dbeaver_session() {
 
   trap - EXIT INT TERM
 
-  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" >/dev/null 2>&1; then
-    kill "$TUNNEL_PID" >/dev/null 2>&1 || true
+  if [[ -n "$TUNNEL_PID" ]]; then
+    if kill -0 -- "-$TUNNEL_PID" >/dev/null 2>&1; then
+      kill -TERM -- "-$TUNNEL_PID" >/dev/null 2>&1 || true
+    elif kill -0 "$TUNNEL_PID" >/dev/null 2>&1; then
+      kill -TERM "$TUNNEL_PID" >/dev/null 2>&1 || true
+    fi
     wait "$TUNNEL_PID" >/dev/null 2>&1 || true
   fi
   TUNNEL_PID=""
@@ -357,12 +360,14 @@ launch_dbeaver() {
       ;;
 
     executable)
+      set -m
       "$DBEAVER_LAUNCH_TARGET" \
         -bringToFront \
         -vars "$variables_file" \
         -con "$connection_spec" \
         >"$log_file" 2>&1 &
       launch_pid=$!
+      set +m
 
       sleep 1
       if ! kill -0 "$launch_pid" >/dev/null 2>&1; then
@@ -409,6 +414,13 @@ start_tunnel_session() {
     --target "$target" \
     --document-name AWS-StartPortForwardingSessionToRemoteHost \
     --parameters "host=$host,portNumber=$remote_port,localPortNumber=$local_port"
+}
+
+start_background_tunnel_session() {
+  set -m
+  start_tunnel_session "$@" &
+  TUNNEL_PID=$!
+  set +m
 }
 
 open_tunnel() {
@@ -617,8 +629,8 @@ open_tunnel() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  start_tunnel_session "$profile" "$region" "$target" "$host" "$remote_port" "$local_port" &
-  TUNNEL_PID=$!
+  start_background_tunnel_session \
+    "$profile" "$region" "$target" "$host" "$remote_port" "$local_port"
 
   wait_for_tunnel "$local_port"
 
@@ -636,8 +648,6 @@ open_tunnel() {
   else
     tunnel_status=$?
   fi
-  TUNNEL_PID=""
-
   if [[ "$tunnel_status" -ne 0 ]]; then
     echo "Database tunnel exited (status $tunnel_status)." >&2
     return "$tunnel_status"

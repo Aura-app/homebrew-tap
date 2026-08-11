@@ -93,13 +93,17 @@ test_db_user_precedence() {
 }
 
 test_linux_launcher_detection() {
+  uname() {
+    printf 'Linux\n'
+  }
+
   cat > "$FAKE_BIN/dbeaver-ce" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
   chmod +x "$FAKE_BIN/dbeaver-ce"
 
-  PATH="$FAKE_BIN:$ORIGINAL_PATH"
+  PATH="$FAKE_BIN"
   unset DB_TUNNEL_DBEAVER_EXECUTABLE
   DBEAVER_LAUNCH_MODE=""
   DBEAVER_LAUNCH_TARGET=""
@@ -108,6 +112,7 @@ EOF
   assert_eq "executable" "$DBEAVER_LAUNCH_MODE" "Linux should use an executable launcher"
   assert_eq "$FAKE_BIN/dbeaver-ce" "$DBEAVER_LAUNCH_TARGET" "Linux should find dbeaver-ce on PATH"
   PATH="$ORIGINAL_PATH"
+  unset -f uname
 }
 
 test_macos_launcher_detection() {
@@ -352,20 +357,41 @@ test_readiness_failures() {
 }
 
 test_cleanup_leaves_dbeaver_running() {
+  local child_pid
+  local child_pid_file="$CAPTURE_DIR/tunnel-child.pid"
   local dbeaver_pid
   local tunnel_pid
 
   DBEAVER_TEMP_DIR="$(mktemp -d "$TEST_TEMP_DIR/tmp/cleanup.XXXXXX")"
   touch "$DBEAVER_TEMP_DIR/variables.properties" "$DBEAVER_TEMP_DIR/dbeaver.log"
 
-  "$SLEEP_EXECUTABLE" 5 &
+  mock_tunnel_with_child() {
+    "$SLEEP_EXECUTABLE" 5 &
+    printf '%s\n' "$!" > "$child_pid_file"
+    wait
+  }
+
+  set -m
+  mock_tunnel_with_child &
   TUNNEL_PID=$!
   tunnel_pid="$TUNNEL_PID"
+  set +m
+
+  for _ in {1..20}; do
+    [[ -f "$child_pid_file" ]] && break
+    "$SLEEP_EXECUTABLE" 0.01
+  done
+  [[ -f "$child_pid_file" ]] || fail "mock tunnel child did not start"
+  child_pid="$(<"$child_pid_file")"
+
+  set -m
   "$SLEEP_EXECUTABLE" 5 &
   dbeaver_pid=$!
+  set +m
   "$SLEEP_EXECUTABLE" 0.05
 
   kill -0 "$tunnel_pid" >/dev/null 2>&1 || fail "mock tunnel should be running before cleanup"
+  kill -0 "$child_pid" >/dev/null 2>&1 || fail "mock Session Manager child should be running before cleanup"
   kill -0 "$dbeaver_pid" >/dev/null 2>&1 || fail "mock DBeaver should be running before cleanup"
 
   cleanup_dbeaver_session
@@ -374,6 +400,9 @@ test_cleanup_leaves_dbeaver_running() {
   if kill -0 "$tunnel_pid" >/dev/null 2>&1; then
     fail "cleanup should stop the SSM tunnel"
   fi
+  if kill -0 "$child_pid" >/dev/null 2>&1; then
+    fail "cleanup should stop the Session Manager child process"
+  fi
   if ! kill -0 "$dbeaver_pid" >/dev/null 2>&1; then
     fail "cleanup should leave DBeaver running"
   fi
@@ -381,6 +410,7 @@ test_cleanup_leaves_dbeaver_running() {
   kill "$dbeaver_pid" >/dev/null 2>&1 || true
   wait "$dbeaver_pid" >/dev/null 2>&1 || true
   TUNNEL_PID=""
+  unset -f mock_tunnel_with_child
 }
 
 test_db_user_precedence
