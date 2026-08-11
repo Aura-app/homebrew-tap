@@ -19,6 +19,46 @@
       "database": "devtest",
       "remotePort": 5432,
       "localPort": 15432
+    },
+    "staging": {
+      "description": "Staging PostgreSQL (read-only, via IAM-auth RDS Proxy) — use your own database role",
+      "profile": "default",
+      "region": "eu-west-1",
+      "target": "i-0dfcbe8d61ae69357",
+      "host": "staging-rds-iam-proxy-read-only.endpoint.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
+      "database": "staging",
+      "remotePort": 5432,
+      "localPort": 15433
+    },
+    "staging-writer": {
+      "description": "Staging Writer PostgreSQL (via IAM-auth RDS Proxy) — use your own database role",
+      "profile": "default",
+      "region": "eu-west-1",
+      "target": "i-0dfcbe8d61ae69357",
+      "host": "staging-rds-iam-proxy.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
+      "database": "staging",
+      "remotePort": 5432,
+      "localPort": 15433
+    },
+    "production": {
+      "description": "Production PostgreSQL (read-only, via IAM-auth RDS Proxy) — use your own database role",
+      "profile": "default",
+      "region": "eu-west-1",
+      "target": "i-0110f90e1da52af1f",
+      "host": "production-rds-iam-proxy-read-only.endpoint.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
+      "database": "production",
+      "remotePort": 5432,
+      "localPort": 15434
+    },
+    "production-writer": {
+      "description": "Production Writer PostgreSQL (via IAM-auth RDS Proxy) — use your own database role",
+      "profile": "default",
+      "region": "eu-west-1",
+      "target": "i-0110f90e1da52af1f",
+      "host": "production-rds-iam-proxy.proxy-cohsew9qkxkf.eu-west-1.rds.amazonaws.com",
+      "database": "production",
+      "remotePort": 5432,
+      "localPort": 15434
     }
   }
 }
