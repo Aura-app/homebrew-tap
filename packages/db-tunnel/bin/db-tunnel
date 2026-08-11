@@ -25,23 +25,33 @@ default_config_file() {
 
 DEFAULT_CONFIG_FILE="$(default_config_file)"
 CONFIG_FILE="${DB_TUNNELS_CONFIG:-$DEFAULT_CONFIG_FILE}"
+TUNNEL_PID=""
+DBEAVER_TEMP_DIR=""
+DBEAVER_LAUNCH_MODE=""
+DBEAVER_LAUNCH_TARGET=""
+DB_AUTH_TOKEN_EXECUTABLE=""
+RESOLVED_DB_USER=""
 
 usage() {
   cat <<EOF
 Usage:
   db-tunnel list
-  db-tunnel open <name> [--local-port PORT]
+  db-tunnel open <name> [--local-port PORT] [--dbeaver] [--db-user USER]
 
 Examples:
   db-tunnel list
   db-tunnel open dev
   db-tunnel open dev-writer --local-port 15440
+  db-tunnel open staging --dbeaver
+  db-tunnel open production --dbeaver --db-user shauns
 
 Environment:
   DB_TUNNELS_CONFIG  Override config file path.
   PGUSER             Your own database role — the standard psql variable;
                      set it once (e.g. in your shell profile) and both
                      psql and db-auth-token pick it up automatically.
+  DB_TUNNEL_DBEAVER_EXECUTABLE
+                     Override the DBeaver executable used by --dbeaver.
 EOF
 }
 
@@ -127,9 +137,285 @@ ensure_aws_login() {
   fi
 }
 
+resolve_db_auth_token_executable() {
+  local configured_command="${DB_AUTH_TOKEN_COMMAND:-}"
+
+  if [[ -n "$configured_command" ]]; then
+    if [[ "$configured_command" == */* ]]; then
+      if [[ ! -x "$configured_command" ]]; then
+        echo "DB_AUTH_TOKEN_COMMAND is not executable: $configured_command" >&2
+        return 1
+      fi
+      DB_AUTH_TOKEN_EXECUTABLE="$configured_command"
+      return
+    fi
+
+    if ! DB_AUTH_TOKEN_EXECUTABLE="$(command -v "$configured_command" 2>/dev/null)"; then
+      echo "DB_AUTH_TOKEN_COMMAND was not found on PATH: $configured_command" >&2
+      return 1
+    fi
+    return
+  fi
+
+  if [[ -x "$SCRIPT_DIR/db-auth-token" ]]; then
+    DB_AUTH_TOKEN_EXECUTABLE="$SCRIPT_DIR/db-auth-token"
+    return
+  fi
+
+  if ! DB_AUTH_TOKEN_EXECUTABLE="$(command -v db-auth-token 2>/dev/null)"; then
+    echo "Missing required command: db-auth-token" >&2
+    return 1
+  fi
+}
+
+resolve_db_user() {
+  local override="$1"
+
+  RESOLVED_DB_USER=""
+
+  if [[ -n "$override" ]]; then
+    RESOLVED_DB_USER="$override"
+  elif [[ -n "${DB_AUTH_TOKEN_DB_USER:-}" ]]; then
+    RESOLVED_DB_USER="$DB_AUTH_TOKEN_DB_USER"
+  elif [[ -n "${PGUSER:-}" ]]; then
+    RESOLVED_DB_USER="$PGUSER"
+  elif [[ -n "${DB_TUNNEL_DB_USER:-}" ]]; then
+    RESOLVED_DB_USER="$DB_TUNNEL_DB_USER"
+  fi
+}
+
+resolve_dbeaver_launcher() {
+  local configured_executable="${DB_TUNNEL_DBEAVER_EXECUTABLE:-}"
+  local platform
+  local candidate
+
+  if [[ -n "$configured_executable" ]]; then
+    if [[ "$configured_executable" == */* ]]; then
+      if [[ ! -x "$configured_executable" ]]; then
+        echo "DB_TUNNEL_DBEAVER_EXECUTABLE is not executable: $configured_executable" >&2
+        return 1
+      fi
+      DBEAVER_LAUNCH_TARGET="$configured_executable"
+    elif ! DBEAVER_LAUNCH_TARGET="$(command -v "$configured_executable" 2>/dev/null)"; then
+      echo "DB_TUNNEL_DBEAVER_EXECUTABLE was not found on PATH: $configured_executable" >&2
+      return 1
+    fi
+
+    DBEAVER_LAUNCH_MODE="executable"
+    return
+  fi
+
+  platform="$(uname -s)"
+
+  case "$platform" in
+    Darwin)
+      require_command open
+
+      for candidate in \
+        DBeaver.app \
+        DBeaverLite.app \
+        DBeaverEE.app \
+        DBeaverUltimate.app
+      do
+        if open -Ra "$candidate" >/dev/null 2>&1; then
+          DBEAVER_LAUNCH_MODE="macos_app"
+          DBEAVER_LAUNCH_TARGET="$candidate"
+          return
+        fi
+      done
+
+      echo "DBeaver was not found." >&2
+      echo "Checked for: DBeaver.app, DBeaverLite.app, DBeaverEE.app, DBeaverUltimate.app." >&2
+      ;;
+
+    Linux)
+      for candidate in \
+        dbeaver \
+        dbeaver-ce \
+        dbeaver-ee \
+        dbeaver-le \
+        dbeaver-lite \
+        dbeaver-ue \
+        dbeaver-ultimate
+      do
+        if DBEAVER_LAUNCH_TARGET="$(command -v "$candidate" 2>/dev/null)"; then
+          DBEAVER_LAUNCH_MODE="executable"
+          return
+        fi
+      done
+
+      echo "DBeaver was not found." >&2
+      echo "Checked PATH for: dbeaver, dbeaver-ce, dbeaver-ee, dbeaver-le," >&2
+      echo "dbeaver-lite, dbeaver-ue, and dbeaver-ultimate." >&2
+      ;;
+
+    *)
+      echo "DBeaver launching is supported only on Linux and macOS, not: $platform" >&2
+      return 1
+      ;;
+  esac
+
+  echo "Install a supported DBeaver edition, or set" >&2
+  echo "DB_TUNNEL_DBEAVER_EXECUTABLE to its executable path." >&2
+  return 1
+}
+
+port_is_open() {
+  local port="$1"
+
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1
+}
+
+wait_for_tunnel() {
+  local local_port="$1"
+  local attempts=0
+  local status
+
+  while (( attempts < 60 )); do
+    if ! kill -0 "$TUNNEL_PID" >/dev/null 2>&1; then
+      if wait "$TUNNEL_PID"; then
+        status=0
+      else
+        status=$?
+      fi
+      TUNNEL_PID=""
+      echo "Database tunnel exited before local port $local_port became ready (status $status)." >&2
+      return 1
+    fi
+
+    if port_is_open "$local_port"; then
+      return
+    fi
+
+    sleep 0.5
+    attempts=$((attempts + 1))
+  done
+
+  echo "Timed out waiting 30 seconds for the database tunnel on 127.0.0.1:$local_port." >&2
+  return 1
+}
+
+cleanup_dbeaver_session() {
+  local status=$?
+
+  trap - EXIT INT TERM
+
+  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" >/dev/null 2>&1; then
+    kill "$TUNNEL_PID" >/dev/null 2>&1 || true
+    wait "$TUNNEL_PID" >/dev/null 2>&1 || true
+  fi
+  TUNNEL_PID=""
+
+  if [[ -n "$DBEAVER_TEMP_DIR" ]]; then
+    rm -f -- \
+      "$DBEAVER_TEMP_DIR/variables.properties" \
+      "$DBEAVER_TEMP_DIR/dbeaver.log"
+    rmdir -- "$DBEAVER_TEMP_DIR" 2>/dev/null || true
+  fi
+  DBEAVER_TEMP_DIR=""
+
+  return "$status"
+}
+
+launch_dbeaver() {
+  local tunnel_name="$1"
+  local local_port="$2"
+  local database="$3"
+  local db_user="$4"
+  local token="$5"
+  local variables_file
+  local log_file
+  local connection_spec
+  local launch_pid
+  local launch_status
+
+  for value in "$tunnel_name" "$database" "$db_user"; do
+    if [[ "$value" == *"|"* || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+      echo "DBeaver connection values cannot contain pipes or newlines." >&2
+      return 1
+    fi
+  done
+
+  DBEAVER_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/db-tunnel-dbeaver.XXXXXX")"
+  variables_file="$DBEAVER_TEMP_DIR/variables.properties"
+  log_file="$DBEAVER_TEMP_DIR/dbeaver.log"
+
+  (umask 077 && printf 'password=%s\n' "$token" > "$variables_file")
+
+  connection_spec="driver=postgres-jdbc|name=Aura $tunnel_name|host=127.0.0.1|port=$local_port|database=$database|user=$db_user|password=\${password}|prop.sslmode=require|connect=true|create=true|save=false"
+
+  case "$DBEAVER_LAUNCH_MODE" in
+    macos_app)
+      if ! open -a "$DBEAVER_LAUNCH_TARGET" --args \
+        -bringToFront \
+        -vars "$variables_file" \
+        -con "$connection_spec"
+      then
+        echo "Failed to launch $DBEAVER_LAUNCH_TARGET." >&2
+        return 1
+      fi
+      ;;
+
+    executable)
+      "$DBEAVER_LAUNCH_TARGET" \
+        -bringToFront \
+        -vars "$variables_file" \
+        -con "$connection_spec" \
+        >"$log_file" 2>&1 &
+      launch_pid=$!
+
+      sleep 1
+      if ! kill -0 "$launch_pid" >/dev/null 2>&1; then
+        if wait "$launch_pid"; then
+          launch_status=0
+        else
+          launch_status=$?
+        fi
+
+        if [[ "$launch_status" -ne 0 ]]; then
+          echo "DBeaver exited during launch (status $launch_status)." >&2
+          if [[ -s "$log_file" ]]; then
+            cat "$log_file" >&2
+          fi
+          return 1
+        fi
+      else
+        disown "$launch_pid" 2>/dev/null || true
+      fi
+      ;;
+
+    *)
+      echo "Internal error: no DBeaver launcher was selected." >&2
+      return 1
+      ;;
+  esac
+
+  echo
+  echo "DBeaver launched with a temporary 'Aura $tunnel_name' connection."
+  echo "The IAM token is not saved in DBeaver and may be used only while it is valid."
+}
+
+start_tunnel_session() {
+  local profile="$1"
+  local region="$2"
+  local target="$3"
+  local host="$4"
+  local remote_port="$5"
+  local local_port="$6"
+
+  exec aws ssm start-session \
+    --profile "$profile" \
+    --region "$region" \
+    --target "$target" \
+    --document-name AWS-StartPortForwardingSessionToRemoteHost \
+    --parameters "host=$host,portNumber=$remote_port,localPortNumber=$local_port"
+}
+
 open_tunnel() {
   local tunnel_name=""
   local local_port_override=""
+  local launch_dbeaver_requested="false"
+  local db_user_override=""
 
   if [[ $# -lt 1 ]]; then
     echo "Missing tunnel name." >&2
@@ -166,6 +452,24 @@ open_tunnel() {
         shift 2
         ;;
 
+      --dbeaver)
+        launch_dbeaver_requested="true"
+        shift
+        ;;
+
+      --db-user)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for --db-user." >&2
+          exit 1
+        fi
+        if [[ -z "$2" || "$2" == -* ]]; then
+          echo "Invalid value for --db-user: $2" >&2
+          exit 1
+        fi
+        db_user_override="$2"
+        shift 2
+        ;;
+
       -h|--help)
         usage
         exit 0
@@ -178,6 +482,11 @@ open_tunnel() {
         ;;
     esac
   done
+
+  if [[ -n "$db_user_override" && "$launch_dbeaver_requested" != "true" ]]; then
+    echo "--db-user is supported only with --dbeaver." >&2
+    exit 1
+  fi
 
   check_config
 
@@ -241,6 +550,27 @@ open_tunnel() {
     exit 1
   fi
 
+  local db_user=""
+
+  if [[ "$launch_dbeaver_requested" == "true" ]]; then
+    resolve_db_user "$db_user_override"
+    db_user="$RESOLVED_DB_USER"
+
+    if [[ -z "$db_user" ]]; then
+      echo "Missing database user for DBeaver." >&2
+      echo "Set PGUSER (recommended), pass --db-user USER, or set DB_AUTH_TOKEN_DB_USER/DB_TUNNEL_DB_USER." >&2
+      exit 1
+    fi
+
+    resolve_db_auth_token_executable
+    resolve_dbeaver_launcher
+
+    if port_is_open "$local_port"; then
+      echo "Local port $local_port is already in use; refusing to launch DBeaver against an unknown listener." >&2
+      exit 1
+    fi
+  fi
+
   ensure_session_manager_plugin
   ensure_aws_login "$profile"
 
@@ -257,27 +587,61 @@ open_tunnel() {
   echo "  local:       localhost:$local_port"
   echo "  database:    $database"
   echo
-  echo "Connect with:"
-  echo
-  echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
-
-  if [[ -z "${PGUSER:-}" ]]; then
+  if [[ "$launch_dbeaver_requested" == "true" ]]; then
+    echo "  client:      DBeaver"
+  else
+    echo "Connect with:"
     echo
-    echo "  (set PGUSER once, e.g. in your shell profile, to your own database"
-    echo "  role — it's the standard psql variable, so both psql and"
-    echo "  db-auth-token pick it up automatically)"
+    echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
+
+    if [[ -z "${PGUSER:-}" ]]; then
+      echo
+      echo "  (set PGUSER once, e.g. in your shell profile, to your own database"
+      echo "  role — it's the standard psql variable, so both psql and"
+      echo "  db-auth-token pick it up automatically)"
+    fi
   fi
 
+  if [[ "$launch_dbeaver_requested" != "true" ]]; then
+    echo
+    echo "Press Ctrl-C to close the tunnel."
+    echo
+  fi
+
+  if [[ "$launch_dbeaver_requested" != "true" ]]; then
+    start_tunnel_session "$profile" "$region" "$target" "$host" "$remote_port" "$local_port"
+    return
+  fi
+
+  trap cleanup_dbeaver_session EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  start_tunnel_session "$profile" "$region" "$target" "$host" "$remote_port" "$local_port" &
+  TUNNEL_PID=$!
+
+  wait_for_tunnel "$local_port"
+
+  local token
+  token="$("$DB_AUTH_TOKEN_EXECUTABLE" "$tunnel_name" --db-user "$db_user")"
+  launch_dbeaver "$tunnel_name" "$local_port" "$database" "$db_user" "$token"
+
   echo
-  echo "Press Ctrl-C to close the tunnel."
+  echo "Press Ctrl-C to close the tunnel. DBeaver will remain open."
   echo
 
-  aws ssm start-session \
-    --profile "$profile" \
-    --region "$region" \
-    --target "$target" \
-    --document-name AWS-StartPortForwardingSessionToRemoteHost \
-    --parameters "host=$host,portNumber=$remote_port,localPortNumber=$local_port"
+  local tunnel_status
+  if wait "$TUNNEL_PID"; then
+    tunnel_status=0
+  else
+    tunnel_status=$?
+  fi
+  TUNNEL_PID=""
+
+  if [[ "$tunnel_status" -ne 0 ]]; then
+    echo "Database tunnel exited (status $tunnel_status)." >&2
+    return "$tunnel_status"
+  fi
 }
 
 main() {
@@ -313,4 +677,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

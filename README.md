@@ -95,8 +95,40 @@ your own database role via a short-lived IAM token.
    tpsql dev
    ```
 
+### Opening DBeaver
+
+If DBeaver is installed, `db-tunnel` can start the tunnel, generate the IAM
+token, and open a connected temporary datasource in one step:
+
+```sh
+db-tunnel open staging --dbeaver
+```
+
+The connection is named after the tunnel, such as `Aura staging`, and is not
+saved to the DBeaver workspace. To use a different database role for one
+launch, pass it explicitly:
+
+```sh
+db-tunnel open production --dbeaver --db-user shauns
+```
+
+On macOS, the launcher detects the Community, Lite, Enterprise, and Ultimate
+app bundles. On Linux, it checks the usual executable names on `PATH`. For an
+installation in another location, provide the executable directly:
+
+```sh
+DB_TUNNEL_DBEAVER_EXECUTABLE=/path/to/dbeaver \
+  db-tunnel open staging --dbeaver
+```
+
+The IAM token is passed through a private temporary variables file rather than
+on DBeaver's command line, and the file is removed when the tunnel closes. If
+DBeaver needs to reconnect after the short-lived token expires, close the old
+tunnel and rerun the command to create a fresh temporary connection.
+
 Press Ctrl-C in the `db-tunnel open` terminal to close the tunnel when
-you're done with it.
+you're done with it. DBeaver remains open, with its temporary connection
+disconnected.
 
 ## Layout
 
