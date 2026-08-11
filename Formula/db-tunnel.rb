@@ -16,6 +16,8 @@ class DbTunnel < Formula
     bin.install "bin/db-tunnel"
     bin.install "bin/db-auth-token"
     pkgshare.install "share/db-tunnels.json"
+    valentina_hook = buildpath/"share/valentina-pre-connect.py"
+    pkgshare.install valentina_hook if valentina_hook.exist?
   end
 
   def caveats

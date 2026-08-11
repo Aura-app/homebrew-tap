@@ -130,6 +130,44 @@ Press Ctrl-C in the `db-tunnel open` terminal to close the tunnel when
 you're done with it. DBeaver remains open, with its temporary connection
 disconnected.
 
+### Connecting With Valentina Studio
+
+Valentina Studio's bookmark pre-connect hook can replace the connection
+password immediately before connecting, which avoids copying a new IAM token
+into the bookmark each time.
+
+1. Create a PostgreSQL bookmark with the local endpoint printed by
+   `db-tunnel list`, your database role, and SSL enabled. For example, staging
+   uses host `127.0.0.1`, port `15433`, and database `staging`.
+2. Locate the script and paste it into the bookmark's **Pre Connect** Python
+   editor. From a checkout, run:
+
+   ```sh
+   less packages/db-tunnel/share/valentina-pre-connect.py
+   ```
+
+   Once using a release that includes Valentina support, the installed copy is
+   available with:
+
+   ```sh
+   less "$(brew --prefix db-tunnel)/share/db-tunnel/valentina-pre-connect.py"
+   ```
+
+3. Change `TUNNEL_NAME` near the top of the pasted script to the matching
+   tunnel name, such as `staging`.
+4. Start the tunnel in a terminal and then open the bookmark in Valentina:
+
+   ```sh
+   db-tunnel open staging
+   ```
+
+The script receives Valentina's mutable `params` connection object, runs
+`db-auth-token` without a shell, trims its stdout, and assigns the result to
+`params.password`. It passes the bookmark's `params.user` explicitly, so the
+generated token always matches the role Valentina will use. The script also
+adds the standard Homebrew paths on Intel and Apple Silicon Macs because GUI
+applications do not necessarily inherit your interactive shell's `PATH`.
+
 ## Layout
 
 ```text
@@ -145,6 +183,7 @@ packages/
       db-auth-token
     share/
       db-tunnels.json
+      valentina-pre-connect.py
   pg-transactions/
     bin/
       pg-transactions
