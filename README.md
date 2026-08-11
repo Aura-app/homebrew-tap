@@ -134,32 +134,52 @@ disconnected.
 
 Valentina Studio's bookmark pre-connect hook can replace the connection
 password immediately before connecting, which avoids copying a new IAM token
-into the bookmark each time.
+into the bookmark each time. The hook is installed with `db-tunnel`; it
+generates the token but does not start the tunnel.
 
-1. Create a PostgreSQL bookmark with the local endpoint printed by
-   `db-tunnel list`, your database role, and SSL enabled. For example, staging
-   uses host `127.0.0.1`, port `15433`, and database `staging`.
-2. Locate the script and paste it into the bookmark's **Pre Connect** Python
-   editor. From a checkout, run:
+1. Locate the hook installed by Homebrew:
 
    ```sh
-   less packages/db-tunnel/share/valentina-pre-connect.py
+   VALENTINA_HOOK="$(brew --prefix db-tunnel)/share/db-tunnel/valentina-pre-connect.py"
+   less "$VALENTINA_HOOK"
    ```
 
-   Once using a release that includes Valentina support, the installed copy is
-   available with:
+   On macOS, copy the complete hook directly to the clipboard with:
 
    ```sh
-   less "$(brew --prefix db-tunnel)/share/db-tunnel/valentina-pre-connect.py"
+   pbcopy < "$VALENTINA_HOOK"
    ```
 
-3. Change `TUNNEL_NAME` near the top of the pasted script to the matching
-   tunnel name, such as `staging`.
-4. Start the tunnel in a terminal and then open the bookmark in Valentina:
+2. Create or edit a **PostgreSQL** bookmark in Valentina Studio. Configure it
+   with the local endpoint from `db-tunnel list`, your own database role, and
+   SSL mode `require`. Do not enable Valentina's SSH tunnel: `db-tunnel` owns
+   that part of the connection. For example, the read-only `dev` bookmark is:
+
+   ```text
+   Name:      Aura dev
+   Host:      127.0.0.1
+   Port:      15432
+   Database:  devtest
+   User:      <your database role>
+   Password:  <blank or any placeholder>
+   SSL mode:  require
+   SSH:       disabled
+   ```
+
+3. In that bookmark's editor, open **Pre Connect**, select **Python**, and
+   paste the complete contents of `valentina-pre-connect.py`. Do not put it in
+   **Post Connect** or a shell-script field.
+4. Change `TUNNEL_NAME` near the top of the pasted hook to exactly the tunnel
+   name used by the bookmark, such as `dev`, `staging`, or `production`.
+5. Save the bookmark, start the same tunnel in a terminal, and leave it
+   running while Valentina is connected:
 
    ```sh
-   db-tunnel open staging
+   db-tunnel open dev
    ```
+
+6. Open the bookmark in Valentina. The hook generates a fresh IAM token and
+   places it in the runtime connection parameters before PostgreSQL connects.
 
 The script receives Valentina's mutable `params` connection object, runs
 `db-auth-token` without a shell, trims its stdout, and assigns the result to
