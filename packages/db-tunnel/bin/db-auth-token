@@ -30,23 +30,28 @@ usage() {
   cat <<EOF
 Usage:
   db-auth-token <name> [--db-user USER]
+  db-auth-token <name> --print-user
 
 Examples:
-  export PGUSER=shauns   # once, e.g. in your shell profile
   PGPASSWORD="\$(db-auth-token dev-writer)" psql -h localhost -p 15432 devtest
+  db-auth-token production --print-user
+
+Database role:
+  Every tunnel goes through an IAM-auth RDS Proxy shared by many identities,
+  so the token is for your own database role. By default that is your AWS IAM
+  user name in lowercase (IAM user "Jane" connects as "jane"). Set PGUSER, or
+  pass --db-user, only if your role is named differently.
+
+  --print-user prints the role that would be used, without making a token.
 
 Config:
-  Reads profile, region, host, and remotePort from db-tunnels.json. There is
-  no per-tunnel default user in config anymore — every tunnel here goes
-  through an IAM-auth RDS Proxy shared by many identities, so you always
-  provide your own database role, most simply by setting PGUSER — the same
-  variable psql itself reads, so one setting configures both.
+  Reads profile, region, host, and remotePort from db-tunnels.json.
 
 Environment:
   DB_TUNNELS_CONFIG      Override config file path.
-  PGUSER                 Your own database role — the standard psql
-                         variable; set it once and both psql and this
-                         command pick it up automatically.
+  PGUSER                 Your database role, if it is not your IAM user name
+                         in lowercase. The standard psql variable, so psql
+                         picks it up too.
   DB_AUTH_TOKEN_DB_USER  Override specific to this command, if you ever need
                          a different user here than PGUSER.
   DB_TUNNEL_DB_USER      Lower-priority fallback if neither PGUSER nor
@@ -71,19 +76,41 @@ check_config() {
   fi
 }
 
+CALLER_ARN=""
+
 ensure_aws_login() {
   local profile="$1"
 
-  if ! aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+  if CALLER_ARN="$(aws sts get-caller-identity --profile "$profile" --query Arn --output text 2>/dev/null)"; then
+    return
+  fi
+
+  if [[ -n "$(aws configure get sso_start_url --profile "$profile" 2>/dev/null)$(aws configure get sso_session --profile "$profile" 2>/dev/null)" ]]; then
     echo "AWS profile '$profile' is not currently authenticated." >&2
     echo "Attempting AWS SSO login..." >&2
     aws sso login --profile "$profile" >&2
+    CALLER_ARN="$(aws sts get-caller-identity --profile "$profile" --query Arn --output text)"
+    return
   fi
+
+  echo "AWS sign-in is not set up on this computer, or your access key is no longer valid." >&2
+  echo "Run 'aws configure' and enter the access key you were given (region: eu-west-1)." >&2
+  exit 1
+}
+
+# IAM user "Jane" maps to database role "jane"; other identities must set PGUSER.
+user_from_caller_arn() {
+  case "$CALLER_ARN" in
+    arn:aws:iam::*:user/*)
+      printf '%s\n' "${CALLER_ARN##*/}" | tr '[:upper:]' '[:lower:]'
+      ;;
+  esac
 }
 
 generate_token() {
   local tunnel_name=""
   local db_user_override=""
+  local print_user="false"
 
   if [[ $# -lt 1 ]]; then
     echo "Missing tunnel name." >&2
@@ -109,6 +136,11 @@ generate_token() {
         fi
         db_user_override="$2"
         shift 2
+        ;;
+
+      --print-user)
+        print_user="true"
+        shift
         ;;
 
       -h|--help)
@@ -173,13 +205,22 @@ generate_token() {
     exit 1
   fi
 
+  ensure_aws_login "$profile"
+
   if [[ -z "$db_user" || "$db_user" == "null" ]]; then
-    echo "Missing database user for IAM token generation." >&2
-    echo "Set PGUSER (recommended), pass --db-user USER, or set DB_AUTH_TOKEN_DB_USER/DB_TUNNEL_DB_USER." >&2
+    db_user="$(user_from_caller_arn)"
+  fi
+
+  if [[ -z "$db_user" ]]; then
+    echo "Could not work out your database role from your AWS identity ($CALLER_ARN)." >&2
+    echo "Set PGUSER to your database role, or pass --db-user USER." >&2
     exit 1
   fi
 
-  ensure_aws_login "$profile"
+  if [[ "$print_user" == "true" ]]; then
+    printf '%s\n' "$db_user"
+    return
+  fi
 
   aws rds generate-db-auth-token \
     --profile "$profile" \

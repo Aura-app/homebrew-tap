@@ -37,19 +37,30 @@ usage() {
 Usage:
   db-tunnel list
   db-tunnel open <name> [--local-port PORT] [--dbeaver] [--db-user USER]
+  db-tunnel valentina <name>
+  db-tunnel doctor
+
+Commands:
+  list        Show the available database tunnels.
+  open        Open a tunnel and keep it open until Ctrl-C.
+  valentina   One-time setup of a Valentina Studio connection for a tunnel.
+  doctor      Check this computer's setup; paste the output into a support
+              ticket if something does not work.
 
 Examples:
   db-tunnel list
   db-tunnel open dev
   db-tunnel open dev-writer --local-port 15440
   db-tunnel open staging --dbeaver
-  db-tunnel open production --dbeaver --db-user shauns
+  db-tunnel valentina production
+
+Your database user is your AWS IAM user name in lowercase. Set PGUSER (or
+pass --db-user) only if yours is named differently.
 
 Environment:
   DB_TUNNELS_CONFIG  Override config file path.
-  PGUSER             Your own database role — the standard psql variable;
-                     set it once (e.g. in your shell profile) and both
-                     psql and db-auth-token pick it up automatically.
+  PGUSER             Your database role, if it is not your IAM user name in
+                     lowercase.
   DB_TUNNEL_DBEAVER_EXECUTABLE
                      Override the DBeaver executable used by --dbeaver.
 EOF
@@ -127,14 +138,69 @@ list_tunnels() {
   ' "$CONFIG_FILE"
 }
 
+uses_sso() {
+  [[ -n "$(aws configure get sso_start_url --profile "$1" 2>/dev/null)$(aws configure get sso_session --profile "$1" 2>/dev/null)" ]]
+}
+
 ensure_aws_login() {
   local profile="$1"
 
-  if ! aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+  if aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+    return
+  fi
+
+  if uses_sso "$profile"; then
     echo "AWS profile '$profile' is not currently authenticated." >&2
     echo "Attempting AWS SSO login..." >&2
     aws sso login --profile "$profile" >&2
+    return
   fi
+
+  echo "AWS sign-in is not set up on this computer, or your access key is no longer valid." >&2
+  echo "Run 'aws configure' and enter the access key you were given (region: eu-west-1)." >&2
+  exit 1
+}
+
+tunnel_field() {
+  jq -r --arg name "$1" --arg field "$2" '.tunnels[$name][$field] // empty' "$CONFIG_FILE"
+}
+
+require_tunnel() {
+  check_config
+  if [[ "$(jq -r --arg name "$1" '.tunnels[$name] != null' "$CONFIG_FILE")" != "true" ]]; then
+    echo "Unknown tunnel: $1" >&2
+    echo >&2
+    list_tunnels >&2
+    exit 1
+  fi
+}
+
+# Explicit --db-user/env vars first, then db-auth-token's default from the AWS identity.
+db_user_for_tunnel() {
+  local tunnel_name="$1" override="${2:-}"
+
+  resolve_db_user "$override"
+  if [[ -n "$RESOLVED_DB_USER" ]]; then
+    printf '%s\n' "$RESOLVED_DB_USER"
+    return
+  fi
+  resolve_db_auth_token_executable
+  "$DB_AUTH_TOKEN_EXECUTABLE" "$tunnel_name" --print-user
+}
+
+share_file() {
+  local candidate
+
+  for candidate in \
+    "$SCRIPT_DIR/../share/$1" \
+    "$SCRIPT_DIR/../share/db-tunnel/$1"
+  do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  return 1
 }
 
 resolve_db_auth_token_executable() {
@@ -565,16 +631,8 @@ open_tunnel() {
   local db_user=""
 
   if [[ "$launch_dbeaver_requested" == "true" ]]; then
-    resolve_db_user "$db_user_override"
-    db_user="$RESOLVED_DB_USER"
-
-    if [[ -z "$db_user" ]]; then
-      echo "Missing database user for DBeaver." >&2
-      echo "Set PGUSER (recommended), pass --db-user USER, or set DB_AUTH_TOKEN_DB_USER/DB_TUNNEL_DB_USER." >&2
-      exit 1
-    fi
-
     resolve_db_auth_token_executable
+    db_user="$(db_user_for_tunnel "$tunnel_name" "$db_user_override")"
     resolve_dbeaver_launcher
 
     if port_is_open "$local_port"; then
@@ -602,16 +660,14 @@ open_tunnel() {
   if [[ "$launch_dbeaver_requested" == "true" ]]; then
     echo "  client:      DBeaver"
   else
-    echo "Connect with:"
+    db_user="$(db_user_for_tunnel "$tunnel_name" 2>/dev/null || echo "<your-database-user>")"
+    echo "Connect with your database tool (e.g. Valentina Studio) to:"
     echo
-    echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port $database"
-
-    if [[ -z "${PGUSER:-}" ]]; then
-      echo
-      echo "  (set PGUSER once, e.g. in your shell profile, to your own database"
-      echo "  role — it's the standard psql variable, so both psql and"
-      echo "  db-auth-token pick it up automatically)"
-    fi
+    echo "  host 127.0.0.1, port $local_port, database $database, user $db_user, SSL required"
+    echo
+    echo "or from another terminal:"
+    echo
+    echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port -U $db_user $database"
   fi
 
   if [[ "$launch_dbeaver_requested" != "true" ]]; then
@@ -654,6 +710,117 @@ open_tunnel() {
   fi
 }
 
+setup_valentina() {
+  if [[ $# -ne 1 || "$1" == -* ]]; then
+    echo "Usage: db-tunnel valentina <name>" >&2
+    exit 1
+  fi
+
+  local tunnel_name="$1" hook db_user script
+
+  require_tunnel "$tunnel_name"
+  hook="$(share_file valentina-pre-connect.py)" || {
+    echo "valentina-pre-connect.py is missing from this installation; reinstall db-tunnel." >&2
+    exit 1
+  }
+  ensure_aws_login "$(tunnel_field "$tunnel_name" profile)"
+  db_user="$(db_user_for_tunnel "$tunnel_name")"
+  script="$(sed "s/^TUNNEL_NAME = .*/TUNNEL_NAME = \"$tunnel_name\"/" "$hook")"
+
+  cat <<EOF
+Valentina Studio setup for "$tunnel_name" (once per computer)
+
+1. In Valentina Studio, create a new PostgreSQL connection (bookmark) with:
+
+     Host:      127.0.0.1
+     Port:      $(tunnel_field "$tunnel_name" localPort)
+     Database:  $(tunnel_field "$tunnel_name" database)
+     User:      $db_user
+     Password:  leave empty
+     SSL:       on
+
+EOF
+
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s\n' "$script" | pbcopy
+    cat <<EOF
+2. Open the connection's "Pre Connect" script editor and paste (Cmd-V).
+   The script is already on your clipboard.
+EOF
+  else
+    cat <<EOF
+2. Open the connection's "Pre Connect" script editor and paste in this script:
+
+$script
+
+EOF
+  fi
+
+  cat <<EOF
+
+3. Save the connection.
+
+Each time you want to use it:
+
+  - In Terminal, run:  db-tunnel open $tunnel_name
+    and leave that window open.
+  - In Valentina Studio, open the connection.
+  - When you are finished, press Ctrl-C in the Terminal window.
+EOF
+}
+
+doctor() {
+  local problems=0 profile identity db_user
+
+  check() {
+    if [[ "$1" == "ok" ]]; then
+      printf '  ✔ %s\n' "$2"
+    else
+      printf '  ✘ %s\n' "$2"
+      [[ -n "${3:-}" ]] && printf '      → %s\n' "$3"
+      problems=$((problems + 1))
+    fi
+  }
+
+  echo "db-tunnel doctor"
+  echo
+  echo "  computer:   $(uname -sm)"
+  echo "  db-tunnel:  $SCRIPT_DIR/db-tunnel"
+  echo "  config:     $CONFIG_FILE"
+  echo
+
+  if command -v brew >/dev/null 2>&1; then check ok "Homebrew installed"; else check fail "Homebrew not found" "install it from https://brew.sh"; fi
+  check ok "AWS CLI installed ($(aws --version 2>&1 | cut -d' ' -f1))"
+  if command -v session-manager-plugin >/dev/null 2>&1; then
+    check ok "Session Manager plugin installed"
+  else
+    check fail "Session Manager plugin not found" "brew install --cask session-manager-plugin"
+  fi
+  if [[ -f "$CONFIG_FILE" ]]; then check ok "tunnel list found"; else check fail "tunnel list missing: $CONFIG_FILE" "brew reinstall db-tunnel"; fi
+
+  profile="$(jq -r '[.tunnels[].profile] | unique | .[0]' "$CONFIG_FILE" 2>/dev/null || echo default)"
+  if identity="$(aws sts get-caller-identity --profile "$profile" --query Arn --output text 2>/dev/null)"; then
+    check ok "signed in to AWS as ${identity##*/} (profile $profile)"
+    if db_user="$(db_user_for_tunnel "$(jq -r '.tunnels | keys[0]' "$CONFIG_FILE")" 2>/dev/null)"; then
+      check ok "database user: $db_user"
+    else
+      check fail "could not work out your database user" "set PGUSER to your database user"
+    fi
+  else
+    check fail "not signed in to AWS (profile $profile)" "run: aws configure"
+  fi
+
+  echo
+  if (( problems == 0 )); then
+    echo "Everything on this computer looks fine. If you still cannot connect, log a"
+    echo "support ticket and include this output and the error you see."
+  else
+    echo "$problems problem(s) found. Fix them as suggested above, or log a support"
+    echo "ticket and include this output."
+    return 1
+  fi
+}
+
 main() {
   require_command jq
   require_command aws
@@ -673,6 +840,14 @@ main() {
 
     open)
       open_tunnel "$@"
+      ;;
+
+    valentina)
+      setup_valentina "$@"
+      ;;
+
+    doctor)
+      doctor
       ;;
 
     -h|--help|help)

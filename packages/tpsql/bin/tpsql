@@ -50,7 +50,8 @@ Options:
   --hostaddr ADDRESS   TCP address for the tunnel. Default: PGHOSTADDR or 127.0.0.1
   --port PORT          PostgreSQL port. Default: PGPORT or tunnel localPort
   --database NAME      PostgreSQL database. Default: PGDATABASE or tunnel database
-  --user USER          Your database role. Default: PGUSER or DB_TUNNEL_DB_USER
+  --user USER          Your database role. Default: PGUSER, DB_TUNNEL_DB_USER,
+                       or your AWS IAM user name in lowercase
   --sslmode MODE       PostgreSQL sslmode. Default: PGSSLMODE or require
   -h, --help           Show this help.
 
@@ -235,19 +236,6 @@ connect_psql() {
     exit 1
   fi
 
-  if [[ -z "$USER" || "$USER" == "null" ]]; then
-    echo "Tunnel '$TUNNEL_NAME' is missing user, and PGUSER/--user was not set." >&2
-    exit 1
-  fi
-
-  local conninfo="host=$HOST hostaddr=$HOSTADDR port=$PORT dbname=$DATABASE user=$USER sslmode=$SSLMODE"
-  local -a psql_args=("$conninfo")
-
-  if [[ ${#PSQL_ARGS[@]} -gt 0 ]]; then
-    psql_args+=("${PSQL_ARGS[@]}")
-  fi
-
-  local password
   local db_auth_token_command="${DB_AUTH_TOKEN_COMMAND:-}"
 
   if [[ -z "$db_auth_token_command" ]]; then
@@ -258,6 +246,18 @@ connect_psql() {
     fi
   fi
 
+  if [[ -z "$USER" || "$USER" == "null" ]]; then
+    USER="$("$db_auth_token_command" "$TUNNEL_NAME" --print-user)"
+  fi
+
+  local conninfo="host=$HOST hostaddr=$HOSTADDR port=$PORT dbname=$DATABASE user=$USER sslmode=$SSLMODE"
+  local -a psql_args=("$conninfo")
+
+  if [[ ${#PSQL_ARGS[@]} -gt 0 ]]; then
+    psql_args+=("${PSQL_ARGS[@]}")
+  fi
+
+  local password
   password="$("$db_auth_token_command" "$TUNNEL_NAME" --db-user "$USER")"
   exec env PGPASSWORD="$password" psql "${psql_args[@]}"
 }
