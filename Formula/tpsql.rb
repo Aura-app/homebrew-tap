@@ -1,12 +1,9 @@
-require_relative "lib/github_cli_download_strategy"
-
 class Tpsql < Formula
   desc "psql wrapper that authenticates to Aura db-tunnel endpoints with a fresh IAM token"
   homepage "https://github.com/aura-app/homebrew-tap"
   version "0.1.2"
 
-  url "https://github.com/aura-app/homebrew-tap/releases/download/tpsql-v0.1.2/tpsql-v0.1.2.tar.gz",
-      using: GitHubCliDownloadStrategy
+  url "https://github.com/aura-app/homebrew-tap/releases/download/tpsql-v0.1.2/tpsql-v0.1.2.tar.gz"
   sha256 "c03f869805e2c502503ded0bf8a9b2bb9f7fdfe46aef71d1ad3b6f016aeff275"
 
   depends_on "db-tunnel"
