@@ -1,0 +1,738 @@
+#!/usr/bin/env bash
+# Admin tool: grant, inspect, and revoke db-tunnel database access.
+# Must stay compatible with macOS's bash 3.2 (no associative arrays, no ${x,,}).
+set -euo pipefail
+
+SCRIPT_DIR="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1
+  pwd
+)"
+
+ACCESS_LEVELS="readonly readwrite admin"
+POLICY_PREFIX="db-tunnel-"
+PORT_FORWARD_DOCUMENT="AWS-StartPortForwardingSessionToRemoteHost"
+
+STATE_DIR=""
+CONFIG_FILE=""
+DB_TUNNEL_BIN=""
+DB_AUTH_TOKEN_BIN=""
+ACCOUNT_ID=""
+ADMIN_DB_USER="${DB_ACCESS_ADMIN_USER:-}"
+ASSUME_YES="false"
+IAM_USERS_CACHE=""
+DB_ROLE_OVERRIDE=""
+ISSUES=0
+NEEDS_ADD="false"
+
+usage() {
+  cat <<EOF
+Usage:
+  db-access list [--env ENV]
+  db-access view <iam-user> [--env ENV]
+  db-access diagnose <iam-user> [--env ENV]
+  db-access add <iam-user> --env ENV[,ENV...] [--access LEVEL]
+                [--create-iam-user] [--new-access-key] [--yes]
+  db-access remove <iam-user> --env ENV[,ENV...] [--yes]
+
+Grants and inspects access for the db-tunnel helper. Access in one environment
+is two things, and both are managed here:
+
+  AWS   inline IAM policy ${POLICY_PREFIX}<env> on the user, allowing a port
+        forward through that environment's tunnel host and rds-db:connect to
+        its IAM-auth RDS Proxy as the user's database role.
+  DB    a LOGIN role named after the IAM user in lowercase (the name db-tunnel
+        uses by default), a member of rds_iam plus one access role.
+
+Environments come from db-tunnels.json: every tunnel with a matching
+"<env>-writer" tunnel. Database changes go through "<env>-writer".
+
+Access levels:
+  readonly   cap_readonly  (default; analytics and reporting)
+  readwrite  cap_readwrite
+  admin      cap_admin
+
+Options:
+  --env ENV           Environment(s), comma separated. Default for list/view/
+                      diagnose: all. Required for add/remove.
+  --access LEVEL      Access level for add. Default: readonly
+  --create-iam-user   add: create the IAM user if it does not exist.
+  --new-access-key    add: create an access key and print it once, for the
+                      person's "aws configure". Send it over a secure channel.
+  --db-role ROLE      The person's database role, when it is not their IAM
+                      user name in lowercase. They must then also set PGUSER,
+                      since db-tunnel derives the role from the IAM name.
+  --admin-user ROLE   Your own database role for admin SQL. Default:
+                      DB_ACCESS_ADMIN_USER, PGUSER, or your IAM user name in
+                      lowercase.
+  --yes               Do not ask for confirmation.
+
+Examples:
+  db-access list --env production
+  db-access add jane --env production --create-iam-user --new-access-key
+  db-access diagnose jane
+  db-access remove jane --env production,staging
+EOF
+}
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# ---------------------------------------------------------------- setup
+
+find_db_tunnel_files() {
+  local candidate brew_prefix=""
+
+  if command -v brew >/dev/null 2>&1; then
+    brew_prefix="$(brew --prefix db-tunnel 2>/dev/null || true)"
+  fi
+
+  # A checkout's sibling package wins, so admins can test unreleased changes.
+  for candidate in "$SCRIPT_DIR/../../db-tunnel" "$brew_prefix"; do
+    [[ -n "$candidate" && -x "$candidate/bin/db-tunnel" ]] || continue
+    DB_TUNNEL_BIN="$candidate/bin/db-tunnel"
+    DB_AUTH_TOKEN_BIN="$candidate/bin/db-auth-token"
+    if [[ -f "$candidate/share/db-tunnels.json" ]]; then
+      CONFIG_FILE="$candidate/share/db-tunnels.json"
+    elif [[ -f "$candidate/share/db-tunnel/db-tunnels.json" ]]; then
+      CONFIG_FILE="$candidate/share/db-tunnel/db-tunnels.json"
+    fi
+    break
+  done
+
+  CONFIG_FILE="${DB_TUNNELS_CONFIG:-$CONFIG_FILE}"
+
+  [[ -n "$DB_TUNNEL_BIN" ]] || die "db-tunnel not found: install it (brew install db-tunnel) or run from a homebrew-tap checkout."
+  [[ -f "$CONFIG_FILE" ]] || die "db-tunnels.json not found (set DB_TUNNELS_CONFIG)."
+}
+
+cleanup() {
+  local status=$? pid_file pid
+
+  trap - EXIT INT TERM
+  if [[ -n "$STATE_DIR" && -d "$STATE_DIR" ]]; then
+    for pid_file in "$STATE_DIR"/*.pid; do
+      [[ -f "$pid_file" ]] || continue
+      pid="$(cat "$pid_file")"
+      kill -TERM -- "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    done
+    rm -rf -- "$STATE_DIR"
+  fi
+  exit "$status"
+}
+
+tunnel_field() {
+  jq -r --arg name "$1" --arg field "$2" '.tunnels[$name][$field] // empty' "$CONFIG_FILE"
+}
+
+all_envs() {
+  jq -r '.tunnels | keys[] as $k | select(has($k + "-writer")) | $k' "$CONFIG_FILE"
+}
+
+# Splits "a,b" into lines and checks each is a known environment.
+parse_envs() {
+  local requested="$1" env known
+
+  known="$(all_envs)"
+  if [[ -z "$requested" ]]; then
+    printf '%s\n' "$known"
+    return
+  fi
+
+  for env in $(printf '%s' "$requested" | tr ',' ' '); do
+    if [[ $'\n'"$known"$'\n' != *$'\n'"$env"$'\n'* ]]; then
+      die "Unknown environment: $env (known: $(printf '%s' "$known" | tr '\n' ' '))"
+    fi
+    printf '%s\n' "$env"
+  done
+}
+
+profile_for() { tunnel_field "$1-writer" profile; }
+region_for() { tunnel_field "$1-writer" region; }
+
+aws_env() {
+  local env="$1"
+  shift
+  aws --profile "$(profile_for "$env")" --region "$(region_for "$env")" "$@"
+}
+
+# Fills caches in the main shell; later lookups run inside $(...) and pipelines,
+# where a failure or a cache write would otherwise be lost.
+prepare() {
+  local envs="$1" env
+
+  env="$(printf '%s\n' "$envs" | head -n 1)"
+  ACCOUNT_ID="$(aws_env "$env" sts get-caller-identity --query Account --output text)" ||
+    die "AWS credentials are not working (aws sts get-caller-identity failed)."
+  load_iam_users
+  for env in $envs; do
+    proxy_resource_id "$env" >/dev/null
+  done
+}
+
+# Writer tunnel hosts look like "<proxy-name>.proxy-<id>.<region>.rds.amazonaws.com".
+proxy_resource_id() {
+  local env="$1" cache="$STATE_DIR/$1.proxy" proxy_name arn
+
+  if [[ ! -s "$cache" ]]; then
+    proxy_name="$(tunnel_field "$env-writer" host | cut -d. -f1)"
+    arn="$(aws_env "$env" rds describe-db-proxies --db-proxy-name "$proxy_name" \
+      --query 'DBProxies[0].DBProxyArn' --output text)" ||
+      die "Could not find RDS proxy '$proxy_name' for $env."
+    printf '%s\n' "${arn##*:}" > "$cache"
+  fi
+  cat "$cache"
+}
+
+dbuser_arn() {
+  printf 'arn:aws:rds-db:%s:%s:dbuser:%s/%s' "$(region_for "$1")" "$ACCOUNT_ID" "$(proxy_resource_id "$1")" "$2"
+}
+
+instance_arn() {
+  printf 'arn:aws:ec2:%s:%s:instance/%s' "$(region_for "$1")" "$ACCOUNT_ID" "$(tunnel_field "$1-writer" target)"
+}
+
+document_arn() {
+  printf 'arn:aws:ssm:%s::document/%s' "$(region_for "$1")" "$PORT_FORWARD_DOCUMENT"
+}
+
+access_role_for() {
+  case "$1" in
+    readonly) echo cap_readonly ;;
+    readwrite) echo cap_readwrite ;;
+    admin) echo cap_admin ;;
+    *) die "Unknown access level: $1 (use one of: $ACCESS_LEVELS)" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- IAM
+
+load_iam_users() {
+  IAM_USERS_CACHE="$(aws iam list-users --output json --query 'Users[].UserName' | jq -r '.[]')"
+}
+
+iam_users() {
+  printf '%s\n' "$IAM_USERS_CACHE"
+}
+
+# IAM names are unique case-insensitively, so "jane" finds "Jane".
+resolve_iam_user() {
+  local wanted
+  wanted="$(lower "$1")"
+  iam_users | while IFS= read -r name; do
+    if [[ "$(lower "$name")" == "$wanted" ]]; then
+      printf '%s\n' "$name"
+      break
+    fi
+  done
+}
+
+db_role_for() {
+  local role
+  role="${DB_ROLE_OVERRIDE:-$(lower "$1")}"
+  if [[ ! "$role" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+    die "Database role '$role' is not a plain name ([a-z_][a-z0-9_]*); pass --db-role."
+  fi
+  printf '%s\n' "$role"
+}
+
+tunnel_policy_document() {
+  local env="$1" role="$2"
+
+  jq -n \
+    --arg dbuser "$(dbuser_arn "$env" "$role")" \
+    --arg instance "$(instance_arn "$env")" \
+    --arg document "$(document_arn "$env")" \
+    --arg sessions "arn:aws:ssm:$(region_for "$env"):$ACCOUNT_ID:session/\${aws:username}-*" \
+    '{
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "ConnectAsOwnDatabaseRole",
+          Effect: "Allow",
+          Action: "rds-db:connect",
+          Resource: $dbuser
+        },
+        {
+          Sid: "PortForwardThroughTunnelHost",
+          Effect: "Allow",
+          Action: "ssm:StartSession",
+          Resource: [$instance, $document],
+          Condition: { BoolIfExists: { "ssm:SessionDocumentAccessCheck": "true" } }
+        },
+        {
+          Sid: "ManageOwnSessions",
+          Effect: "Allow",
+          Action: ["ssm:TerminateSession", "ssm:ResumeSession"],
+          Resource: $sessions
+        }
+      ]
+    }'
+}
+
+# Prints allowed / implicitDeny / explicitDeny.
+simulate() {
+  local user="$1" action="$2" resource="$3"
+  shift 3
+
+  aws iam simulate-principal-policy \
+    --policy-source-arn "arn:aws:iam::$ACCOUNT_ID:user/$user" \
+    --action-names "$action" \
+    --resource-arns "$resource" \
+    "$@" \
+    --query 'EvaluationResults[0].EvalDecision' --output text
+}
+
+can_start_session() {
+  local user="$1" env="$2" decision
+  local context=(--context-entries "ContextKeyName=ssm:SessionDocumentAccessCheck,ContextKeyValues=true,ContextKeyType=boolean")
+
+  for resource in "$(instance_arn "$env")" "$(document_arn "$env")"; do
+    decision="$(simulate "$user" ssm:StartSession "$resource" "${context[@]}")"
+    if [[ "$decision" != "allowed" ]]; then
+      printf '%s\n' "$decision"
+      return
+    fi
+  done
+  echo allowed
+}
+
+# Policies on the user (inline or attached) whose names say they grant tunnel or proxy access.
+user_access_policies() {
+  local user="$1"
+  {
+    aws iam list-user-policies --user-name "$user" --output json --query PolicyNames | jq -r '.[]'
+    aws iam list-attached-user-policies --user-name "$user" --output json --query 'AttachedPolicies[].PolicyName' | jq -r '.[]'
+  } | grep -E "^(${POLICY_PREFIX}|rds-iam-proxy-connect|.*-(rds|ssm)-)" || true
+}
+
+legacy_policy_for_env() {
+  case "$1" in
+    dev) echo rds-iam-proxy-connect ;;
+    *) echo "rds-iam-proxy-connect-$1" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- database
+
+free_port() {
+  local port
+  for port in $(seq 25432 25531); do
+    if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; then
+      echo "$port"
+      return
+    fi
+  done
+  die "No free local port found in 25432-25531."
+}
+
+open_admin_tunnel() {
+  local env="$1" port pid attempts=0
+
+  [[ -f "$STATE_DIR/$env.port" ]] && return
+
+  port="$(free_port)"
+  set -m
+  "$DB_TUNNEL_BIN" open "$env-writer" --local-port "$port" >"$STATE_DIR/$env.log" 2>&1 &
+  pid=$!
+  set +m
+  echo "$pid" > "$STATE_DIR/$env.pid"
+
+  while ! (exec 3<>"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; do
+    if ! kill -0 "$pid" >/dev/null 2>&1 || (( attempts >= 60 )); then
+      cat "$STATE_DIR/$env.log" >&2
+      die "Could not open the $env-writer tunnel."
+    fi
+    sleep 0.5
+    attempts=$((attempts + 1))
+  done
+  echo "$port" > "$STATE_DIR/$env.port"
+}
+
+# Runs SQL from stdin as the admin against an environment. Extra args go to psql.
+admin_psql() {
+  local env="$1" port token
+  shift
+
+  open_admin_tunnel "$env"
+  port="$(cat "$STATE_DIR/$env.port")"
+  token="$("$DB_AUTH_TOKEN_BIN" "$env-writer" --db-user "$ADMIN_DB_USER")"
+
+  PGPASSWORD="$token" psql \
+    "host=127.0.0.1 port=$port dbname=$(tunnel_field "$env-writer" database) user=$ADMIN_DB_USER sslmode=${PGSSLMODE:-require}" \
+    -X -q -v ON_ERROR_STOP=1 "$@" -f -
+}
+
+# One line per role: name|can_login|has_rds_iam|access roles (comma separated).
+db_roles_query() {
+  cat <<'SQL'
+select r.rolname,
+       r.rolcanlogin,
+       exists (select 1 from pg_auth_members m join pg_roles g on g.oid = m.roleid
+               where m.member = r.oid and g.rolname = 'rds_iam'),
+       coalesce((select string_agg(g.rolname, ',' order by g.rolname)
+                 from pg_auth_members m join pg_roles g on g.oid = m.roleid
+                 where m.member = r.oid and g.rolname in ('cap_readonly', 'cap_readwrite', 'cap_admin')), '')
+from pg_roles r
+SQL
+}
+
+db_role_state() {
+  local env="$1" role="$2"
+  { db_roles_query; echo "where r.rolname = :'role'"; } |
+    admin_psql "$env" -A -t -F'|' -v role="$role"
+}
+
+# ---------------------------------------------------------------- output
+
+if [[ -t 1 ]]; then
+  TICK=$'\033[32m✔\033[0m' CROSS=$'\033[31m✘\033[0m'
+else
+  TICK="✔" CROSS="✘"
+fi
+
+ok() { printf '  %s %s\n' "$TICK" "$*"; }
+bad() { printf '  %s %s\n' "$CROSS" "$*"; ISSUES=$((ISSUES + 1)); }
+# Problems "db-access add" would fix; the hint then prints once per environment.
+needs_add() { bad "$@"; NEEDS_ADD="true"; }
+note() { printf '  · %s\n' "$*"; }
+
+confirm() {
+  local response
+  [[ "$ASSUME_YES" == "true" ]] && return
+  [[ -t 0 ]] || die "Refusing to change access without a terminal; pass --yes."
+  read -r -p "$1 [y/N] " response
+  case "$response" in
+    y | Y | yes | YES) ;;
+    *) die "Cancelled." ;;
+  esac
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_list() {
+  local envs="$1" env user role login rds_iam access iam_name
+
+  prepare "$envs"
+  for env in $envs; do
+    echo "== $env (database roles with IAM login)"
+    printf '  %-20s %-24s %-6s %s\n' ROLE ACCESS LOGIN IAM-USER
+    { db_roles_query; echo "where r.rolname !~ '^(pg_|rds)' order by 1"; } |
+      admin_psql "$env" -A -t -F'|' |
+      while IFS='|' read -r role login rds_iam access; do
+        [[ "$rds_iam" == "t" ]] || continue
+        iam_name="$(resolve_iam_user "$role")"
+        printf '  %-20s %-24s %-6s %s\n' "$role" "${access:-none}" \
+          "$([[ "$login" == "t" ]] && echo yes || echo NO)" "${iam_name:-(none: service or removed)}"
+      done
+    echo
+  done
+}
+
+# Checks one environment; with deep=true also simulates IAM and checks the tunnel host.
+check_env() {
+  local user="$1" role="$2" env="$3" deep="$4"
+  local state login rds_iam access policy decision ping
+
+  echo "== $env"
+  NEEDS_ADD="false"
+
+  if aws iam get-user-policy --user-name "$user" --policy-name "$POLICY_PREFIX$env" >/dev/null 2>&1; then
+    policy="$(aws iam get-user-policy --user-name "$user" --policy-name "$POLICY_PREFIX$env" --output json --query PolicyDocument)"
+    if [[ "$(jq -S . <<<"$policy")" == "$(tunnel_policy_document "$env" "$role" | jq -S .)" ]]; then
+      ok "IAM policy $POLICY_PREFIX$env is current"
+    else
+      needs_add "IAM policy $POLICY_PREFIX$env differs from what db-access would write"
+    fi
+  else
+    note "no $POLICY_PREFIX$env policy (access may come from groups or older policies)"
+  fi
+
+  if [[ "$deep" == "true" ]]; then
+    decision="$(simulate "$user" rds-db:connect "$(dbuser_arn "$env" "$role")")"
+    if [[ "$decision" == "allowed" ]]; then
+      ok "IAM allows connecting to the database as '$role'"
+    else
+      needs_add "IAM does not allow rds-db:connect as '$role' ($decision)"
+    fi
+
+    decision="$(can_start_session "$user" "$env")"
+    if [[ "$decision" == "allowed" ]]; then
+      ok "IAM allows opening the $env tunnel"
+    else
+      needs_add "IAM does not allow ssm:StartSession for the $env tunnel ($decision)"
+    fi
+
+    ping="$(aws_env "$env" ssm describe-instance-information \
+      --filters "Key=InstanceIds,Values=$(tunnel_field "$env-writer" target)" \
+      --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo unknown)"
+    if [[ "$ping" == "Online" ]]; then
+      ok "tunnel host $(tunnel_field "$env-writer" target) is online in SSM"
+    else
+      bad "tunnel host $(tunnel_field "$env-writer" target) SSM status: $ping (affects everyone)"
+    fi
+  fi
+
+  state="$(db_role_state "$env" "$role")"
+  if [[ -z "$state" ]]; then
+    needs_add "database role '$role' does not exist"
+  else
+    IFS='|' read -r _ login rds_iam access <<<"$state"
+    if [[ "$login" == "t" ]]; then ok "database role '$role' can log in"; else needs_add "database role '$role' is NOLOGIN"; fi
+    if [[ "$rds_iam" == "t" ]]; then ok "'$role' is a member of rds_iam"; else needs_add "'$role' is not a member of rds_iam (IAM tokens will be rejected)"; fi
+    if [[ -n "$access" ]]; then ok "access: $access"; else needs_add "'$role' has no cap_* access role (can log in but read nothing)"; fi
+  fi
+
+  if [[ "$NEEDS_ADD" == "true" ]]; then
+    printf '  → fix with: db-access add %s --env %s --access <readonly|readwrite|admin>\n' "$user" "$env"
+  fi
+}
+
+check_identity() {
+  local user="$1" role="$2" keys key_id last_used
+
+  echo "== AWS identity"
+  ok "IAM user $user → database role '$role'"
+
+  keys="$(aws iam list-access-keys --user-name "$user" --output json \
+    --query 'AccessKeyMetadata[?Status==`Active`].[AccessKeyId,CreateDate]' | jq -r '.[] | @tsv')"
+  if [[ -z "$keys" ]]; then
+    bad "no active access key, so the AWS CLI on their computer cannot sign in"
+    printf '  → fix with: db-access add %s --env <env> --new-access-key\n' "$user"
+  else
+    while IFS=$'\t' read -r key_id _; do
+      last_used="$(aws iam get-access-key-last-used --access-key-id "$key_id" --output text \
+        --query 'AccessKeyLastUsed.LastUsedDate' 2>/dev/null || echo unknown)"
+      ok "active access key $key_id (last used: ${last_used/None/never})"
+    done <<<"$keys"
+  fi
+
+  local policies
+  policies="$(user_access_policies "$user" | tr '\n' ' ')"
+  if [[ -n "$policies" ]]; then
+    note "access-related policies on the user: $policies"
+  fi
+}
+
+cmd_view() {
+  local requested="$1" envs="$2" deep="$3" user role env
+
+  prepare "$envs"
+  user="$(resolve_iam_user "$requested")"
+  [[ -n "$user" ]] || die "No IAM user named '$requested'. Create one with: db-access add $requested --env <env> --create-iam-user"
+  role="$(db_role_for "$user")"
+
+  ISSUES=0
+  check_identity "$user" "$role"
+  echo
+  for env in $envs; do
+    check_env "$user" "$role" "$env" "$deep"
+    echo
+  done
+
+  if (( ISSUES == 0 )); then
+    echo "No problems found."
+  else
+    echo "$ISSUES problem(s) found."
+    [[ "$deep" == "true" ]] || echo "Run 'db-access diagnose $user${DB_ROLE_OVERRIDE:+ --db-role $DB_ROLE_OVERRIDE}' for the full IAM and tunnel host checks."
+    return 1
+  fi
+}
+
+grant_sql() {
+  cat <<'SQL'
+set client_min_messages = warning;
+select format('create role %I login', :'role')
+where not exists (select 1 from pg_roles where rolname = :'role') \gexec
+select format('alter role %I login', :'role') \gexec
+select format('grant rds_iam to %I', :'role') \gexec
+select format('revoke %I from %I', g, :'role')
+from unnest(array['cap_readonly', 'cap_readwrite', 'cap_admin']) g
+where g <> :'access_role'
+  and exists (select 1 from pg_auth_members m
+              join pg_roles gr on gr.oid = m.roleid and gr.rolname = g
+              join pg_roles mr on mr.oid = m.member and mr.rolname = :'role') \gexec
+select format('grant %I to %I', :'access_role', :'role') \gexec
+SQL
+}
+
+revoke_sql() {
+  cat <<'SQL'
+set client_min_messages = warning;
+select format('alter role %I nologin', :'role')
+where exists (select 1 from pg_roles where rolname = :'role') \gexec
+select format('revoke %I from %I', g.rolname, :'role')
+from pg_auth_members m
+join pg_roles g on g.oid = m.roleid
+join pg_roles r on r.oid = m.member and r.rolname = :'role'
+where g.rolname in ('rds_iam', 'cap_readonly', 'cap_readwrite', 'cap_admin') \gexec
+select count(pg_terminate_backend(pid)) as terminated_sessions
+from pg_stat_activity where usename = :'role';
+SQL
+}
+
+cmd_add() {
+  local requested="$1" envs="$2" access="$3" create_user="$4" new_key="$5"
+  local user role access_role env key
+
+  prepare "$envs"
+  access_role="$(access_role_for "$access")"
+  user="$(resolve_iam_user "$requested")"
+  role="$(db_role_for "${user:-$requested}")"
+
+  echo "Plan:"
+  if [[ -z "$user" ]]; then
+    [[ "$create_user" == "true" ]] || die "No IAM user named '$requested'. Pass --create-iam-user to create it."
+    user="$requested"
+    echo "  - create IAM user $user (no console password)"
+  fi
+  [[ "$new_key" == "true" ]] && echo "  - create a new access key for $user and print it once"
+  for env in $envs; do
+    echo "  - $env: put IAM policy $POLICY_PREFIX$env; database role '$role' with LOGIN, rds_iam, $access_role"
+  done
+  confirm "Apply?"
+
+  if [[ -z "$(resolve_iam_user "$user")" ]]; then
+    aws iam create-user --user-name "$user" --tags Key=managed-by,Value=db-access >/dev/null
+    load_iam_users
+    echo "Created IAM user $user"
+  fi
+
+  for env in $envs; do
+    aws iam put-user-policy --user-name "$user" --policy-name "$POLICY_PREFIX$env" \
+      --policy-document "$(tunnel_policy_document "$env" "$role")"
+    echo "$env: IAM policy $POLICY_PREFIX$env written"
+    grant_sql | admin_psql "$env" -1 -v role="$role" -v access_role="$access_role" >/dev/null ||
+      die "$env: database change failed. Your role '$ADMIN_DB_USER' needs CREATEROLE (or rds_superuser); see --admin-user."
+    # Read back rather than trust the grants: REVOKE semantics changed in Postgres 16.
+    if [[ "$(db_role_state "$env" "$role")" != "$role|t|t|$access_role" ]]; then
+      die "$env: database role '$role' is not as expected after the change: $(db_role_state "$env" "$role")"
+    fi
+    echo "$env: database role '$role' can log in with $access_role"
+  done
+
+  if [[ "$new_key" == "true" ]]; then
+    key="$(aws iam create-access-key --user-name "$user" --output json --query AccessKey)"
+    cat <<EOF
+
+Access key for $user (shown once; send it over a secure channel, never by email or Slack):
+
+  AWS Access Key ID:     $(jq -r .AccessKeyId <<<"$key")
+  AWS Secret Access Key: $(jq -r .SecretAccessKey <<<"$key")
+  Default region name:   $(region_for "$(printf '%s\n' "$envs" | head -n 1)")
+EOF
+  fi
+
+  echo
+  echo "Done. Their database username is: $role"
+}
+
+cmd_remove() {
+  local requested="$1" envs="$2" user role env policy state
+
+  prepare "$envs"
+  user="$(resolve_iam_user "$requested")"
+  role="$(db_role_for "${user:-$requested}")"
+
+  echo "Plan:"
+  for env in $envs; do
+    echo "  - $env: delete IAM policies $POLICY_PREFIX$env and $(legacy_policy_for_env "$env") if present;"
+    echo "    database role '$role' → NOLOGIN, revoke rds_iam and cap_*, end open sessions"
+  done
+  confirm "Apply?"
+
+  for env in $envs; do
+    if [[ -n "$user" ]]; then
+      for policy in "$POLICY_PREFIX$env" "$(legacy_policy_for_env "$env")"; do
+        if aws iam delete-user-policy --user-name "$user" --policy-name "$policy" >/dev/null 2>&1; then
+          echo "$env: deleted IAM policy $policy"
+        fi
+      done
+    fi
+    revoke_sql | admin_psql "$env" -1 -A -t -v role="$role" | sed "s/^/$env: sessions ended: /"
+    state="$(db_role_state "$env" "$role")"
+    if [[ -n "$state" && "$state" != "$role|f|f|" ]]; then
+      die "$env: database role '$role' is not as expected after the change: $state"
+    fi
+    echo "$env: database role '$role' disabled"
+
+    if [[ -n "$user" ]] && [[ "$(simulate "$user" rds-db:connect "$(dbuser_arn "$env" "$role")")" == "allowed" ]]; then
+      echo "$env: WARNING: IAM still allows rds-db:connect as '$role' through another policy or group:" >&2
+      user_access_policies "$user" | sed 's/^/    /' >&2
+    fi
+  done
+}
+
+main() {
+  local command="${1:-}" target="" envs="" access="readonly" create_user="false" new_key="false"
+
+  case "$command" in
+    "" | -h | --help | help) usage; exit 0 ;;
+  esac
+  shift
+
+  if [[ "$command" != "list" ]]; then
+    [[ $# -ge 1 && "$1" != -* ]] || die "Missing IAM user name. See: db-access --help"
+    target="$1"
+    shift
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --env) [[ $# -ge 2 ]] || die "Missing value for --env."; envs="$2"; shift 2 ;;
+      --access) [[ $# -ge 2 ]] || die "Missing value for --access."; access="$2"; shift 2 ;;
+      --admin-user) [[ $# -ge 2 ]] || die "Missing value for --admin-user."; ADMIN_DB_USER="$2"; shift 2 ;;
+      --db-role) [[ $# -ge 2 ]] || die "Missing value for --db-role."; DB_ROLE_OVERRIDE="$2"; shift 2 ;;
+      --create-iam-user) create_user="true"; shift ;;
+      --new-access-key) new_key="true"; shift ;;
+      --yes | -y) ASSUME_YES="true"; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) die "Unknown argument: $1" ;;
+    esac
+  done
+
+  require_command aws
+  require_command jq
+  require_command psql
+  find_db_tunnel_files
+
+  STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/db-access.XXXXXX")"
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  if [[ ( "$command" == "add" || "$command" == "remove" ) && -z "$envs" ]]; then
+    die "--env is required for $command (e.g. --env production)."
+  fi
+  envs="$(parse_envs "$envs")"
+  [[ -n "$envs" ]] || exit 1
+
+  if [[ -z "$ADMIN_DB_USER" ]]; then
+    ADMIN_DB_USER="${PGUSER:-}"
+  fi
+  if [[ -z "$ADMIN_DB_USER" ]]; then
+    ADMIN_DB_USER="$(lower "$(aws sts get-caller-identity --query Arn --output text | sed -n 's#.*:user/##p')")"
+    [[ -n "$ADMIN_DB_USER" ]] || die "Could not derive your database role; pass --admin-user."
+  fi
+
+  case "$command" in
+    list) cmd_list "$envs" ;;
+    view) cmd_view "$target" "$envs" false ;;
+    diagnose) cmd_view "$target" "$envs" true ;;
+    add) cmd_add "$target" "$envs" "$access" "$create_user" "$new_key" ;;
+    remove) cmd_remove "$target" "$envs" ;;
+    *) die "Unknown command: $command. See: db-access --help" ;;
+  esac
+}
+
+main "$@"
