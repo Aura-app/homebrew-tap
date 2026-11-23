@@ -247,7 +247,7 @@ test_full_dbeaver_flow() {
   assert_file_contains "$CAPTURE_DIR/variables.properties" "password=temporary-iam-token" "variables file should carry the token"
   assert_eq "600" "$(<"$CAPTURE_DIR/variables.mode")" "variables file should be private"
 
-  cleanup_dbeaver_session
+  cleanup_tunnel_session
   trap cleanup_test EXIT
 
   if [[ -e "$secret_dir" ]]; then
@@ -278,7 +278,7 @@ test_macos_launch_arguments() {
   assert_file_contains "$CAPTURE_DIR/macos-open.args" "connect=true" "macOS connection should connect immediately"
   assert_file_not_contains "$CAPTURE_DIR/macos-open.args" "mac-token" "macOS argv must not expose the token"
 
-  cleanup_dbeaver_session
+  cleanup_tunnel_session
   trap cleanup_test EXIT
   [[ ! -e "$secret_dir" ]] || fail "macOS launch secrets should be cleaned up"
 
@@ -394,7 +394,7 @@ test_cleanup_leaves_dbeaver_running() {
   kill -0 "$child_pid" >/dev/null 2>&1 || fail "mock Session Manager child should be running before cleanup"
   kill -0 "$dbeaver_pid" >/dev/null 2>&1 || fail "mock DBeaver should be running before cleanup"
 
-  cleanup_dbeaver_session
+  cleanup_tunnel_session
   trap cleanup_test EXIT
 
   if kill -0 "$tunnel_pid" >/dev/null 2>&1; then
@@ -413,6 +413,61 @@ test_cleanup_leaves_dbeaver_running() {
   unset -f mock_tunnel_with_child
 }
 
+test_keepalive_reports_failure_and_recovery() {
+  local output
+  local results=(ok fail fail ok)
+
+  PROBE_CALLS=0
+  SLEEP_ARGS=""
+
+  probe_tunnel() {
+    local result="${results[$PROBE_CALLS]}"
+    PROBE_CALLS=$((PROBE_CALLS + 1))
+    [[ "$result" == "ok" ]]
+  }
+
+  sleep() {
+    SLEEP_ARGS="$SLEEP_ARGS $1"
+    [[ "$PROBE_CALLS" -lt "${#results[@]}" ]]
+  }
+
+  output="$(keep_tunnel_alive staging 16444 300 2>&1; echo "sleeps:$SLEEP_ARGS")"
+
+  assert_contains "$output" "Tunnel check failed" "a failed check should be reported"
+  assert_contains "$output" "run 'db-tunnel open staging' again" "the warning should say how to recover"
+  assert_contains "$output" "The tunnel is working again." "recovery should be reported"
+  assert_eq "1" "$(grep -c 'Tunnel check failed' <<<"$output")" "repeated failures should warn once"
+  assert_contains "$output" "sleeps: 300 300 60 60 300" "failing tunnels should be rechecked every minute"
+
+  unset -f probe_tunnel sleep
+}
+
+test_cleanup_stops_keepalive() {
+  local keepalive_pid
+
+  DB_TUNNEL_KEEPALIVE_SECONDS=300
+  start_keepalive staging 16444
+  keepalive_pid="$KEEPALIVE_PID"
+  "$SLEEP_EXECUTABLE" 0.2
+  kill -0 -- "-$keepalive_pid" >/dev/null 2>&1 || fail "keepalive should be running before cleanup"
+
+  cleanup_tunnel_session
+  trap cleanup_test EXIT
+
+  for _ in {1..20}; do
+    kill -0 -- "-$keepalive_pid" >/dev/null 2>&1 || break
+    "$SLEEP_EXECUTABLE" 0.05
+  done
+  if kill -0 -- "-$keepalive_pid" >/dev/null 2>&1; then
+    fail "cleanup should stop the keepalive loop and its pending sleep"
+  fi
+
+  DB_TUNNEL_KEEPALIVE_SECONDS=0
+  start_keepalive staging 16444
+  assert_eq "" "$KEEPALIVE_PID" "DB_TUNNEL_KEEPALIVE_SECONDS=0 should disable the keepalive"
+  unset DB_TUNNEL_KEEPALIVE_SECONDS
+}
+
 test_db_user_precedence
 test_linux_launcher_detection
 test_macos_launcher_detection
@@ -424,5 +479,7 @@ test_busy_port_rejected_before_session
 test_db_user_requires_dbeaver
 test_readiness_failures
 test_cleanup_leaves_dbeaver_running
+test_keepalive_reports_failure_and_recovery
+test_cleanup_stops_keepalive
 
 echo "db-tunnel DBeaver tests passed"

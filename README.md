@@ -82,6 +82,16 @@ differently.
 3. **In a separate terminal**, run the `psql` command as printed. Each run
    generates a fresh, short-lived IAM token — nothing to remember or rotate.
 
+**Staying open:** Session Manager closes a tunnel after 20 minutes without
+traffic. While `db-tunnel open` runs, it sends a tiny check through the tunnel
+every 5 minutes. The check is Postgres's SSL request, which needs no login. This
+keeps the tunnel open while you are not using it. If the database stops
+answering, for example because the network dropped or the computer slept, the
+terminal prints a timestamped warning, and prints another message when it
+recovers. If the tunnel closes, the terminal says so. Rerun `db-tunnel open`,
+then reconnect your database tool. Set `DB_TUNNEL_KEEPALIVE_SECONDS` to change
+the interval, or to `0` to turn the checks off.
+
 ### Opening DBeaver
 
 If DBeaver is installed, `db-tunnel` can start the tunnel, generate the IAM

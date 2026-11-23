@@ -26,6 +26,7 @@ default_config_file() {
 DEFAULT_CONFIG_FILE="$(default_config_file)"
 CONFIG_FILE="${DB_TUNNELS_CONFIG:-$DEFAULT_CONFIG_FILE}"
 TUNNEL_PID=""
+KEEPALIVE_PID=""
 DBEAVER_TEMP_DIR=""
 DBEAVER_LAUNCH_MODE=""
 DBEAVER_LAUNCH_TARGET=""
@@ -63,6 +64,9 @@ Environment:
                      lowercase.
   DB_TUNNEL_DBEAVER_EXECUTABLE
                      Override the DBeaver executable used by --dbeaver.
+  DB_TUNNEL_KEEPALIVE_SECONDS
+                     How often to check the open tunnel, which also stops it
+                     closing when idle (default 300; 0 turns it off).
 EOF
 }
 
@@ -360,10 +364,79 @@ wait_for_tunnel() {
   return 1
 }
 
-cleanup_dbeaver_session() {
+# Round trip through the tunnel without logging in: send Postgres's 8-byte
+# SSLRequest and wait for its 1-byte answer ('S' or 'N'). The local port accepts
+# connections even when the AWS side is broken, so only a reply proves the path
+# to the database works.
+probe_tunnel() {
+  local port="$1"
+
+  (
+    exec 3<>"/dev/tcp/127.0.0.1/$port" || exit 1
+    printf '\000\000\000\010\004\322\026\057' >&3
+    IFS= read -r -t 15 -n 1 reply <&3 || exit 1
+    [[ "$reply" == "S" || "$reply" == "N" ]]
+  ) 2>/dev/null
+}
+
+# Sends traffic through the tunnel so Session Manager's idle timeout does not
+# close it, and reports when the database stops (or starts again) answering.
+keep_tunnel_alive() {
+  local tunnel_name="$1" local_port="$2" interval="$3"
+  local healthy="true" next_check="$interval"
+
+  while sleep "$next_check"; do
+    if probe_tunnel "$local_port"; then
+      if [[ "$healthy" != "true" ]]; then
+        echo "[$(date +%H:%M)] The tunnel is working again." >&2
+        healthy="true"
+      fi
+      next_check="$interval"
+    else
+      if [[ "$healthy" == "true" ]]; then
+        cat >&2 <<EOF
+[$(date +%H:%M)] Tunnel check failed: the database did not answer through the tunnel.
+        Your network may be down, or this computer may have been asleep.
+        If this message is not followed by "working again" within a few
+        minutes, press Ctrl-C, run 'db-tunnel open $tunnel_name' again, and
+        reconnect your database tool.
+EOF
+        healthy="false"
+      fi
+      next_check=60
+    fi
+  done
+}
+
+start_keepalive() {
+  local interval="${DB_TUNNEL_KEEPALIVE_SECONDS:-300}"
+
+  if [[ ! "$interval" =~ ^[0-9]+$ ]]; then
+    echo "Ignoring invalid DB_TUNNEL_KEEPALIVE_SECONDS: $interval" >&2
+    interval=300
+  fi
+  if (( interval == 0 )); then
+    return
+  fi
+
+  # Own process group, so cleanup can stop the loop and its pending sleep.
+  set -m
+  keep_tunnel_alive "$@" "$interval" &
+  KEEPALIVE_PID=$!
+  set +m
+}
+
+cleanup_tunnel_session() {
   local status=$?
 
   trap - EXIT INT TERM
+
+  if [[ -n "$KEEPALIVE_PID" ]]; then
+    kill -TERM -- "-$KEEPALIVE_PID" >/dev/null 2>&1 ||
+      kill -TERM "$KEEPALIVE_PID" >/dev/null 2>&1 || true
+    wait "$KEEPALIVE_PID" >/dev/null 2>&1 || true
+  fi
+  KEEPALIVE_PID=""
 
   if [[ -n "$TUNNEL_PID" ]]; then
     if kill -0 -- "-$TUNNEL_PID" >/dev/null 2>&1; then
@@ -669,19 +742,9 @@ open_tunnel() {
     echo
     echo "  PGPASSWORD=\"\$(db-auth-token $tunnel_name)\" psql -h localhost -p $local_port -U $db_user $database"
   fi
+  echo
 
-  if [[ "$launch_dbeaver_requested" != "true" ]]; then
-    echo
-    echo "Press Ctrl-C to close the tunnel."
-    echo
-  fi
-
-  if [[ "$launch_dbeaver_requested" != "true" ]]; then
-    start_tunnel_session "$profile" "$region" "$target" "$host" "$remote_port" "$local_port"
-    return
-  fi
-
-  trap cleanup_dbeaver_session EXIT
+  trap cleanup_tunnel_session EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
@@ -690,13 +753,19 @@ open_tunnel() {
 
   wait_for_tunnel "$local_port"
 
-  local token
-  token="$("$DB_AUTH_TOKEN_EXECUTABLE" "$tunnel_name" --db-user "$db_user")"
-  launch_dbeaver "$tunnel_name" "$local_port" "$database" "$db_user" "$token"
+  if [[ "$launch_dbeaver_requested" == "true" ]]; then
+    local token
+    token="$("$DB_AUTH_TOKEN_EXECUTABLE" "$tunnel_name" --db-user "$db_user")"
+    launch_dbeaver "$tunnel_name" "$local_port" "$database" "$db_user" "$token"
+    echo
+    echo "Press Ctrl-C to close the tunnel. DBeaver will remain open."
+  else
+    echo
+    echo "Tunnel is ready. Press Ctrl-C to close it."
+  fi
+  echo
 
-  echo
-  echo "Press Ctrl-C to close the tunnel. DBeaver will remain open."
-  echo
+  start_keepalive "$tunnel_name" "$local_port"
 
   local tunnel_status
   if wait "$TUNNEL_PID"; then
@@ -704,10 +773,14 @@ open_tunnel() {
   else
     tunnel_status=$?
   fi
-  if [[ "$tunnel_status" -ne 0 ]]; then
-    echo "Database tunnel exited (status $tunnel_status)." >&2
-    return "$tunnel_status"
-  fi
+  TUNNEL_PID=""
+
+  cat >&2 <<EOF
+
+[$(date +%H:%M)] The tunnel has closed (status $tunnel_status).
+        Run 'db-tunnel open $tunnel_name' again, then reconnect your database tool.
+EOF
+  return "$tunnel_status"
 }
 
 setup_valentina() {

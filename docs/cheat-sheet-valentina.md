@@ -66,6 +66,11 @@ delete it.
 2. In Valentina Studio, open your Aura connection.
 3. When you have finished, go back to Terminal and press **Ctrl-C**.
 
+The Terminal window warns you if the connection stops working, for example
+after your Mac has been asleep. If it says **"The tunnel has closed"**, run
+`db-tunnel open production` again, then disconnect and reconnect in Valentina
+Studio.
+
 ## If something goes wrong
 
 Run `db-tunnel doctor`, then log a support ticket at [LINK TBC] with its output
