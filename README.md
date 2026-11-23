@@ -36,7 +36,8 @@ admin grants it with `db-access`, below).
    support ticket.
 
 Non-developers using Valentina Studio can follow the one-page
-[cheat sheet](docs/cheat-sheet-valentina.md) instead.
+[cheat sheet](docs/cheat-sheet-valentina.md) instead. On Windows, see
+[Appendix: Windows (WSL)](#appendix-windows-wsl).
 
 **Upgrading:** `brew upgrade <package>` alone can silently skip refreshing
 tap definitions if Homebrew's automatic update ran recently (it's throttled).
@@ -214,3 +215,75 @@ To build the same archive locally:
 ```sh
 scripts/package-homebrew-package db-tunnel 0.1.0
 ```
+
+## Appendix: Windows (WSL)
+
+`db-tunnel` is a bash script, so on Windows it runs inside WSL (Ubuntu), not
+PowerShell or Git Bash. Git Bash is not supported: the Windows builds of `aws`
+and `jq` print Windows line endings, which corrupt the IAM token.
+
+1. **Install WSL with Ubuntu.** In PowerShell as Administrator:
+
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+
+   Restart when asked, then open **Ubuntu** from the Start menu and create
+   a Linux user name and password. Run every remaining step in that Ubuntu
+   terminal.
+
+2. **Install git, jq and the PostgreSQL client:**
+
+   ```sh
+   sudo apt update
+   sudo apt install -y git jq unzip curl postgresql-client
+   ```
+
+3. **Install the AWS CLI v2.** Ubuntu's `awscli` package is v1 and is not
+   supported, so use Amazon's installer:
+
+   ```sh
+   cd /tmp
+   curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o awscliv2.zip
+   unzip -q awscliv2.zip
+   sudo ./aws/install
+   aws --version
+   ```
+
+4. **Install the Session Manager plugin:**
+
+   ```sh
+   case "$(uname -m)" in aarch64) arch=arm64 ;; *) arch=64bit ;; esac
+   curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${arch}/session-manager-plugin.deb" -o session-manager-plugin.deb
+   sudo dpkg -i session-manager-plugin.deb
+   session-manager-plugin --version
+   ```
+
+5. **Clone the tap and put `db-tunnel` on your `PATH`:**
+
+   ```sh
+   git clone https://github.com/Aura-app/homebrew-tap.git ~/homebrew-tap
+   echo 'export PATH="$HOME/homebrew-tap/packages/db-tunnel/bin:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+   `db-tunnel` finds its tunnel list next to the script, so nothing else
+   needs copying.
+
+6. **Configure AWS and check the setup**, as for macOS:
+
+   ```sh
+   aws configure    # default profile, region eu-west-1
+   db-tunnel doctor
+   ```
+
+**Updating:** `git -C ~/homebrew-tap pull`.
+
+**Connecting:** run `db-tunnel open dev` in an Ubuntu terminal and leave it
+open. `psql` in a second Ubuntu terminal works as described above. Windows
+applications such as DBeaver can also connect to `localhost` on the printed
+port, because WSL forwards it to Windows. For their password, run
+`db-auth-token dev` in Ubuntu and paste the output; it expires after 15
+minutes, but an open connection stays up. `--dbeaver` and the Valentina hook
+need DBeaver or Valentina to run inside WSL, so they do not work with the
+Windows apps.

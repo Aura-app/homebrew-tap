@@ -789,14 +789,20 @@ doctor() {
   echo "  config:     $CONFIG_FILE"
   echo
 
-  if command -v brew >/dev/null 2>&1; then check ok "Homebrew installed"; else check fail "Homebrew not found" "install it from https://brew.sh"; fi
+  local plugin_hint="brew install --cask session-manager-plugin" config_hint="brew reinstall db-tunnel"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if command -v brew >/dev/null 2>&1; then check ok "Homebrew installed"; else check fail "Homebrew not found" "install it from https://brew.sh"; fi
+  else
+    plugin_hint="see the Windows (WSL) appendix in the homebrew-tap README"
+    config_hint="git pull in your homebrew-tap clone"
+  fi
   check ok "AWS CLI installed ($(aws --version 2>&1 | cut -d' ' -f1))"
   if command -v session-manager-plugin >/dev/null 2>&1; then
     check ok "Session Manager plugin installed"
   else
-    check fail "Session Manager plugin not found" "brew install --cask session-manager-plugin"
+    check fail "Session Manager plugin not found" "$plugin_hint"
   fi
-  if [[ -f "$CONFIG_FILE" ]]; then check ok "tunnel list found"; else check fail "tunnel list missing: $CONFIG_FILE" "brew reinstall db-tunnel"; fi
+  if [[ -f "$CONFIG_FILE" ]]; then check ok "tunnel list found"; else check fail "tunnel list missing: $CONFIG_FILE" "$config_hint"; fi
 
   profile="$(jq -r '[.tunnels[].profile] | unique | .[0]' "$CONFIG_FILE" 2>/dev/null || echo default)"
   if identity="$(aws sts get-caller-identity --profile "$profile" --query Arn --output text 2>/dev/null)"; then
